@@ -1,3 +1,4 @@
+// @ts-ignore - node:sqlite added in Node.js 22.5, @types/node may lag
 import { DatabaseSync } from "node:sqlite"
 import { drizzle } from "drizzle-orm/node-sqlite"
 
