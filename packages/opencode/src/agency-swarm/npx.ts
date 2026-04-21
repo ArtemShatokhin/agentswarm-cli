@@ -2,7 +2,7 @@ import * as prompts from "@clack/prompts"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { mkdtemp, rm, writeFile, chmod, unlink } from "node:fs/promises"
 import { AgencySwarmAdapter } from "./adapter"
 import { AgencySwarmRunSession } from "./run-session"
@@ -42,6 +42,15 @@ interface PythonInfo {
   cmd: string[]
   executable: string
   version: string
+}
+
+interface VenvCanaryResult {
+  healthy: boolean
+  stderr: string
+}
+
+interface DependencyInstallResult extends CommandResult {
+  hadManifests: boolean
 }
 
 export function shouldRunNpxOnboarding(input: {
@@ -115,8 +124,84 @@ async function listResumeSessions(directory: string) {
   return Array.from(Session.listGlobal({ directory, roots: true, start, limit: 1 }))
 }
 
+const BUNFS_PREFIXES = ["/$bunfs/", "B:/~BUN/", "B:\\~BUN\\"] as const
+const LAUNCHER_SUBCOMMANDS = new Set([
+  "completion",
+  "acp",
+  "mcp",
+  "attach",
+  "run",
+  "generate",
+  "debug",
+  "console",
+  "providers",
+  "agent",
+  "upgrade",
+  "uninstall",
+  "serve",
+  "web",
+  "models",
+  "stats",
+  "export",
+  "import",
+  "github",
+  "pr",
+  "session",
+  "agency",
+  "agencii",
+  "plugin",
+  "db",
+])
+const PROJECT_PATH_PREFIXES = ["./", ".\\", "../", "..\\", "~/", "~\\", "/", "\\\\"] as const
+
+function isBunfsPath(value: string | undefined): value is string {
+  return typeof value === "string" && BUNFS_PREFIXES.some((prefix) => value.startsWith(prefix))
+}
+
+function isExistingDirectory(value: string) {
+  const resolved = path.resolve(value)
+  if (!existsSync(resolved)) return false
+  try {
+    return statSync(resolved).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function looksLikeProjectPath(value: string) {
+  if (PROJECT_PATH_PREFIXES.some((prefix) => value.startsWith(prefix))) return true
+  if (/^[A-Za-z]:/.test(value)) return true
+  return isExistingDirectory(value)
+}
+
+function looksLikeSubcommand(arg: string) {
+  // Subcommands are bare words. Paths (with separators or dots) and flags are positional/optional.
+  if (arg.startsWith("-")) return false
+  if (arg.includes("/") || arg.includes("\\")) return false
+  if (arg.includes(".")) return false
+  return true
+}
+
 function isLauncher(input: { env: NodeJS.ProcessEnv; argv?: string[] }) {
-  return input.env[LAUNCHER_ENTRY_ENV] === "1" || isAgentswarmCommand(input.argv ?? process.argv)
+  // The platform binary's argv[0] does not always round-trip as "agentswarm" (Bun single-file
+  // executables rewrite argv to ["bun","/$bunfs/root/src/index.js", ...userArgs] on posix and
+  // ["bun","B:/~BUN/root/src/index.js", ...userArgs] on Windows), so basename detection alone
+  // is unreliable. The env var is the canonical opt-out. When neither signal is set, inspect
+  // the user-facing args and default to launcher mode for the default TUI entry, including the
+  // documented `$0 [project]` positional form.
+  if (input.env[LAUNCHER_ENTRY_ENV] === "0") return false
+  if (input.env[LAUNCHER_ENTRY_ENV] === "1") return true
+  const argv = input.argv ?? process.argv
+  if (isAgentswarmCommand(argv)) return true
+  const userArgs = argv[0] === "bun" && isBunfsPath(argv[1]) ? argv.slice(2) : argv.slice(1)
+  const firstUserArg = userArgs[0]
+  if (!firstUserArg) return true
+  if (firstUserArg.startsWith("-")) return true
+  if (!LAUNCHER_SUBCOMMANDS.has(firstUserArg) && looksLikeProjectPath(firstUserArg)) return true
+  // The default command accepts an optional positional `project` path. Treat any arg that does
+  // not look like a subcommand as the project positional, which keeps launcher mode on.
+  if (!looksLikeSubcommand(firstUserArg)) return true
+  return false
 }
 
 async function resolveRunProject(
@@ -658,13 +743,24 @@ async function ensureProjectPython(directory: string) {
     prompts.log.error("Dependency install failed")
     throw new Error(install.stderr.trim() || install.stdout.trim() || "Dependency install failed")
   }
+  const canary = await venvCanaryPasses([venvPython], { cwd: directory, includeStderr: true })
+  if (!canary.healthy) {
+    prompts.log.error("Python environment unhealthy")
+    throw new Error(await formatPostInstallCanaryFailure(directory, install.hadManifests, canary.stderr))
+  }
+
   prompts.log.step("Python environment ready")
 
   const nodePackage = path.join(directory, "package.json")
   if (await Filesystem.exists(nodePackage)) {
     prompts.log.step("Installing Node.js dependencies")
-    await runCommand(["npm", "install", "--legacy-peer-deps"], { cwd: directory })
-    prompts.log.step("Node.js dependencies installed")
+    const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
+    const npmInstall = await runCommand([npmCmd, "install", "--legacy-peer-deps"], { cwd: directory })
+    if (npmInstall.code !== 0) {
+      prompts.log.warn(`npm install: ${npmInstall.stderr.trim() || npmInstall.stdout.trim()}`)
+    } else {
+      prompts.log.step("Node.js dependencies installed")
+    }
   }
 
   prompts.log.step("Installing Playwright browsers (this may take a minute)...")
@@ -682,32 +778,91 @@ async function findUv(python: string[]): Promise<string | null> {
   return null
 }
 
-async function installProjectDependencies(directory: string, python: string[], uv: string | null) {
+async function installProjectDependencies(
+  directory: string,
+  python: string[],
+  uv: string | null,
+): Promise<DependencyInstallResult> {
   const requirements = path.join(directory, "requirements.txt")
   if (await Filesystem.exists(requirements)) {
-    return uv
-      ? runCommand([uv, "pip", "install", "--python", python[0], "-r", "requirements.txt"], { cwd: directory })
-      : runCommand([...python, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"], { cwd: directory })
+    const result = uv
+      ? await runCommand([uv, "pip", "install", "--python", python[0], "-r", "requirements.txt"], { cwd: directory })
+      : await runCommand([...python, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"], { cwd: directory })
+    return { ...result, hadManifests: true }
   }
 
   const pyproject = path.join(directory, "pyproject.toml")
   if (await Filesystem.exists(pyproject)) {
-    return uv
-      ? runCommand([uv, "pip", "install", "--python", python[0], "-e", "."], { cwd: directory })
-      : runCommand([...python, "-m", "pip", "install", "--upgrade", "-e", "."], { cwd: directory })
+    const result = uv
+      ? await runCommand([uv, "pip", "install", "--python", python[0], "-e", "."], { cwd: directory })
+      : await runCommand([...python, "-m", "pip", "install", "--upgrade", "-e", "."], { cwd: directory })
+    return { ...result, hadManifests: true }
   }
 
-  return uv
-    ? runCommand([uv, "pip", "install", "--python", python[0], "agency-swarm[fastapi,litellm]>=1.9.1"])
-    : runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.1"])
+  const result = uv
+    ? await runCommand([uv, "pip", "install", "--python", python[0], "agency-swarm[fastapi,litellm]>=1.9.1"], {
+        cwd: directory,
+      })
+    : await runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.1"], {
+        cwd: directory,
+      })
+  return { ...result, hadManifests: false }
 }
 
-async function venvCanaryPasses(python: string[]) {
-  const result = await runCommand([
-    ...python,
-    "-c",
-    "from agency_swarm.integrations.fastapi import run_fastapi",
-  ])
+async function formatPostInstallCanaryFailure(directory: string, hadManifests: boolean, stderr: string) {
+  const summary = summarizeBridgeStderr(stderr)
+  const shadowingHint = await formatShadowingHint(directory)
+  if (isImportLikeCanaryFailure(stderr)) {
+    if (hadManifests) {
+      return summary
+        ? `Canary import failed. Check requirements.txt/pyproject.toml for agency-swarm version compatibility.${shadowingHint} Canary stderr: ${summary}`
+        : `Canary import failed. Check requirements.txt/pyproject.toml for agency-swarm version compatibility.${shadowingHint}`
+    }
+    return summary
+      ? `Canary import failed on fallback install. Inspect the stderr below and check for project-local fastapi.py/agency_swarm.py that may shadow installed packages.${shadowingHint} Canary stderr: ${summary}`
+      : `Canary import failed on fallback install. Inspect the stderr below and check for project-local fastapi.py/agency_swarm.py that may shadow installed packages.${shadowingHint}`
+  }
+  return summary
+    ? `Project \`.venv\` rebuilt successfully, but the Agency Swarm import canary still failed.${shadowingHint} Canary stderr: ${summary}`
+    : `Project \`.venv\` rebuilt successfully, but the Agency Swarm import canary still failed.${shadowingHint}`
+}
+
+function isImportLikeCanaryFailure(stderr: string) {
+  return /\b(?:ImportError|ModuleNotFoundError)\b/.test(stderr)
+}
+
+async function formatShadowingHint(directory: string) {
+  const shadowingFiles = await findProjectShadowingFiles(directory)
+  if (shadowingFiles.length === 0) return ""
+  return ` Detected project-local ${shadowingFiles.join(", ")} that may shadow installed packages.`
+}
+
+async function findProjectShadowingFiles(directory: string) {
+  const shadowingFiles = await Promise.all(
+    ["fastapi.py", "agency_swarm.py"].map(async (file) =>
+      (await Filesystem.exists(path.join(directory, file))) ? file : undefined,
+    ),
+  )
+  return shadowingFiles.flatMap((file) => (file ? [file] : []))
+}
+
+async function venvCanaryPasses(python: string[], options?: { cwd?: string }): Promise<boolean>
+async function venvCanaryPasses(python: string[], options: { cwd?: string; includeStderr: true }): Promise<VenvCanaryResult>
+async function venvCanaryPasses(python: string[], options?: { cwd?: string; includeStderr?: boolean }) {
+  // No cwd by default: the canary must not pick up project-local modules (e.g. `fastapi.py`
+  // sitting next to `agency.py`) that shadow installed packages and falsely flag a healthy
+  // .venv as broken. Callers that need the server-launch cwd (post-install verification)
+  // pass it explicitly.
+  const result = await runCommand(
+    [...python, "-c", "from agency_swarm.integrations.fastapi import run_fastapi"],
+    options?.cwd ? { cwd: options.cwd } : undefined,
+  )
+  if (options?.includeStderr) {
+    return {
+      healthy: result.code === 0,
+      stderr: result.stderr,
+    }
+  }
   return result.code === 0
 }
 

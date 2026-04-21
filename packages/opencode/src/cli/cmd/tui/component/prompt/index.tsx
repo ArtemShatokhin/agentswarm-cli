@@ -6,13 +6,13 @@ import { fileURLToPath } from "url"
 import { Filesystem } from "@/util/filesystem"
 import { useLocal } from "@tui/context/local"
 import { useTheme } from "@tui/context/theme"
+import { useAgencySwarmConnection } from "@tui/context/agency-swarm-connection"
 import { EmptyBorder, SplitBorder } from "@tui/component/border"
 import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { MessageID, PartID } from "@/session/schema"
-import { displayAgentName } from "@/agent/display"
-import { createStore, produce } from "solid-js/store"
+import { createStore, produce, unwrap } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
 import { assign } from "./part"
@@ -47,6 +47,7 @@ import {
   shouldOpenAgencyAuthDialog,
 } from "../../session-error"
 import { errorMessage as toErrorMessage } from "@/util/error"
+import { displayRunOnlyAgentLabel } from "../../util/agency-target"
 
 export type PromptProps = {
   sessionID?: string
@@ -84,6 +85,31 @@ function randomIndex(count: number) {
   return Math.floor(Math.random() * count)
 }
 
+function waitForSessionPromptProgress(sdk: ReturnType<typeof useSDK>, sessionID: string) {
+  let done = false
+  let offMessage = () => {}
+
+  const cleanup = () => {
+    if (done) return
+    done = true
+    offMessage()
+  }
+
+  const promise = new Promise<void>((resolve) => {
+    offMessage = sdk.event.on("message.updated", (evt) => {
+      if (evt.properties.info.sessionID !== sessionID) return
+      if (evt.properties.info.role !== "assistant") return
+      cleanup()
+      resolve()
+    })
+  })
+
+  return {
+    promise,
+    cleanup,
+  }
+}
+
 export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
   let anchor: BoxRenderable
@@ -91,6 +117,7 @@ export function Prompt(props: PromptProps) {
 
   const keybind = useKeybind()
   const local = useLocal()
+  const agencyConnection = useAgencySwarmConnection()
   const sdk = useSDK()
   const route = useRoute()
   const sync = useSync()
@@ -108,6 +135,14 @@ export function Prompt(props: PromptProps) {
   const [auto, setAuto] = createSignal<AutocompleteRef>()
   const activeOrgName = createMemo(() => sync.data.console_state.activeOrgName)
   const canSwitchOrgs = createMemo(() => sync.data.console_state.switchableOrgCount > 1)
+  const frameworkMode = createMemo(() =>
+    isAgencySwarmFrameworkMode({
+      currentProviderID: local.model.current()?.providerID,
+      configuredModel: sync.data.config.model,
+      agentModel: local.agent.current()?.model,
+    }),
+  )
+  const effectiveAgentName = createMemo(() => (frameworkMode() ? "build" : local.agent.current().name))
   const currentProviderLabel = createMemo(() => {
     const current = local.model.current()
     const provider = local.model.parsed().provider
@@ -194,6 +229,7 @@ export function Prompt(props: PromptProps) {
     extmarkToPartIndex: new Map(),
     interrupt: 0,
   })
+  const showAgencyReconnect = createMemo(() => store.mode === "normal" && agencyConnection.requiresReconnect())
 
   createEffect(
     on(
@@ -310,16 +346,8 @@ export function Prompt(props: PromptProps) {
         slash: {
           name: "editor",
         },
-        enabled: !isAgencySwarmFrameworkMode({
-          currentProviderID: local.model.current()?.providerID,
-          configuredModel: sync.data.config.model,
-          agentModel: local.agent.current()?.model,
-        }),
-        hidden: isAgencySwarmFrameworkMode({
-          currentProviderID: local.model.current()?.providerID,
-          configuredModel: sync.data.config.model,
-          agentModel: local.agent.current()?.model,
-        }),
+        enabled: !frameworkMode(),
+        hidden: frameworkMode(),
         onSelect: async (dialog) => {
           dialog.clear()
 
@@ -482,6 +510,8 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  const isDialogBlockingPrompt = () => dialog.stack.length > 0
+
   function restoreExtmarksFromParts(parts: PromptInfo["parts"]) {
     input.extmarks.clear()
     setStore("extmarkToPartIndex", new Map())
@@ -617,6 +647,7 @@ export function Prompt(props: PromptProps) {
 
   async function submit() {
     if (props.disabled) return
+    if (isDialogBlockingPrompt()) return
     if (autocomplete?.visible) return
     if (!store.prompt.input) return
     const trimmed = store.prompt.input.trim()
@@ -648,9 +679,7 @@ export function Prompt(props: PromptProps) {
     const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
     const firstWord = firstLine.split(" ")[0]
     const localSlash = firstWord.startsWith("/")
-      ? command
-          .slashes()
-          .find((item) => [item.display, ...(item.aliases ?? [])].includes(firstWord))
+      ? command.slashes().find((item) => [item.display, ...(item.aliases ?? [])].includes(firstWord))
       : undefined
 
     const clearSubmittedPrompt = (submittedMode: typeof store.mode) => {
@@ -704,15 +733,28 @@ export function Prompt(props: PromptProps) {
     ) {
       toast.show({
         variant: "warning",
-        message: "Add a supported provider credential before sending a message",
+        message: "No provider credential is configured. Run /auth to add it.",
         duration: 4000,
       })
       dialog.replace(() => <DialogAuth />)
       return
     }
 
+    if (currentMode !== "shell" && agencyConnection.requiresReconnect()) {
+      toast.show({
+        variant: "warning",
+        message: "Reconnect to a local agency-swarm server before sending a message",
+        duration: 4000,
+      })
+      agencyConnection.openConnectDialog()
+      return
+    }
+    const submittedPrompt = structuredClone(unwrap(store.prompt))
     let sessionID = props.sessionID
     let createdSessionID: string | undefined
+    let navigatedToCreatedSession = false
+    let navigateTimer: ReturnType<typeof setTimeout> | undefined
+    let promptProgress: ReturnType<typeof waitForSessionPromptProgress> | undefined
     if (sessionID == null) {
       const res = await sdk.client.session.create({
         workspaceID: props.workspaceID,
@@ -729,6 +771,7 @@ export function Prompt(props: PromptProps) {
 
       sessionID = res.data.id
       createdSessionID = sessionID
+      promptProgress = waitForSessionPromptProgress(sdk, sessionID)
     }
 
     const messageID = MessageID.ascending()
@@ -741,7 +784,7 @@ export function Prompt(props: PromptProps) {
     if (store.mode === "shell") {
       sdk.client.session.shell({
         sessionID,
-        agent: local.agent.current().name,
+        agent: effectiveAgentName(),
         model: {
           providerID: selectedModel.providerID,
           modelID: selectedModel.modelID,
@@ -759,7 +802,7 @@ export function Prompt(props: PromptProps) {
         sessionID,
         command: command.slice(1),
         arguments: args,
-        agent: local.agent.current().name,
+        agent: effectiveAgentName(),
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
         messageID,
         variant,
@@ -771,12 +814,13 @@ export function Prompt(props: PromptProps) {
           })),
       })
     } else {
+      const savedPrompt = { input: store.prompt.input, parts: [...store.prompt.parts] }
       try {
-        await sdk.client.session.prompt({
+        const promptTask = sdk.client.session.prompt({
           sessionID,
           ...selectedModel,
           messageID,
-          agent: local.agent.current().name,
+          agent: effectiveAgentName(),
           model: selectedModel,
           variant,
           parts: [
@@ -788,18 +832,51 @@ export function Prompt(props: PromptProps) {
             ...nonTextParts.map(assign),
           ],
         })
+
+        if (createdSessionID) {
+          const newSessionID = createdSessionID
+          await Promise.race([promptTask, promptProgress!.promise])
+
+          // temporary hack to make sure the message is sent
+          navigateTimer = setTimeout(() => {
+            navigateTimer = undefined
+            navigatedToCreatedSession = true
+            route.navigate({
+              type: "session",
+              sessionID: newSessionID,
+            })
+          }, 50)
+        }
+
+        await promptTask
       } catch (error) {
+        // Fork-only: surface auth errors via the connect/auth dialog and restore the
+        // composer state so the user can retry. Rebuilding extmarks from the saved parts
+        // keeps file/agent/paste markers in sync — without this, syncExtmarksWithPromptParts
+        // would drop them on the next keystroke.
+        setStore("prompt", savedPrompt)
+        input.setText(savedPrompt.input)
+        restoreExtmarksFromParts(savedPrompt.parts)
         const message = toErrorMessage(error)
         const shouldReopenAuth = shouldOpenAgencyAuthDialog({
           providerID: selectedModel.providerID,
           message,
         })
-        if (createdSessionID) {
-          if (shouldReopenAuth) {
-            void sdk.client.session.delete({
-              sessionID: createdSessionID,
+        if (navigateTimer) {
+          clearTimeout(navigateTimer)
+          navigateTimer = undefined
+        }
+        if (createdSessionID && shouldReopenAuth) {
+          if (navigatedToCreatedSession) {
+            route.navigate({
+              type: "home",
+              workspaceID: props.workspaceID,
+              initialPrompt: submittedPrompt,
             })
           }
+          void sdk.client.session.delete({
+            sessionID: createdSessionID,
+          })
         }
         if (shouldReopenAuth) {
           toast.show({
@@ -816,18 +893,11 @@ export function Prompt(props: PromptProps) {
           duration: 5000,
         })
         return
+      } finally {
+        promptProgress?.cleanup()
       }
     }
     clearSubmittedPrompt(currentMode)
-
-    // temporary hack to make sure the message is sent
-    if (!props.sessionID)
-      setTimeout(() => {
-        route.navigate({
-          type: "session",
-          sessionID,
-        })
-      }, 50)
   }
   const exit = useExit()
 
@@ -1018,6 +1088,10 @@ export function Prompt(props: PromptProps) {
                   e.preventDefault()
                   return
                 }
+                if (isDialogBlockingPrompt()) {
+                  if (e.name !== "escape") e.preventDefault()
+                  return
+                }
                 // Check clipboard for images before terminal-handled paste runs.
                 // This helps terminals that forward Ctrl+V to the app; Windows
                 // Terminal 1.25+ usually handles Ctrl+V before this path.
@@ -1094,6 +1168,10 @@ export function Prompt(props: PromptProps) {
               onSubmit={submit}
               onPaste={async (event: PasteEvent) => {
                 if (props.disabled) {
+                  event.preventDefault()
+                  return
+                }
+                if (isDialogBlockingPrompt()) {
                   event.preventDefault()
                   return
                 }
@@ -1191,7 +1269,12 @@ export function Prompt(props: PromptProps) {
             <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
               <box flexDirection="row" gap={1}>
                 <text fg={highlight()}>
-                  {store.mode === "shell" ? "Shell" : displayAgentName(local.agent.current().name)}{" "}
+                  {store.mode === "shell"
+                    ? "Shell"
+                    : displayRunOnlyAgentLabel({
+                        frameworkMode: frameworkMode(),
+                        localAgentName: effectiveAgentName(),
+                      })}{" "}
                 </text>
                 <Show when={store.mode === "normal"}>
                   <box flexDirection="row" gap={1}>
@@ -1199,6 +1282,12 @@ export function Prompt(props: PromptProps) {
                       {local.model.parsed().model}
                     </text>
                     <text fg={theme.textMuted}>{currentProviderLabel()}</text>
+                    <Show when={showAgencyReconnect()}>
+                      <text fg={theme.error}>·</text>
+                      <text fg={theme.error} onMouseUp={() => agencyConnection.openConnectDialog()}>
+                        disconnected
+                      </text>
+                    </Show>
                     <Show when={showVariant()}>
                       <text fg={theme.textMuted}>·</text>
                       <text>
@@ -1348,7 +1437,8 @@ export function Prompt(props: PromptProps) {
                     </Match>
                     <Match when={true}>
                       <text fg={theme.text}>
-                        {keybind.print("agent_cycle")} <span style={{ fg: theme.textMuted }}>agents</span>
+                        {keybind.print("agent_cycle")}{" "}
+                        <span style={{ fg: theme.textMuted }}>{frameworkMode() ? "recipients" : "agents"}</span>
                       </text>
                     </Match>
                   </Switch>

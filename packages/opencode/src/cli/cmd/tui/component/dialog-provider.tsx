@@ -2,7 +2,7 @@ import { createMemo, createResource, createSignal, onCleanup, onMount, Show } fr
 import { useSync } from "@tui/context/sync"
 import { map, pipe, sortBy } from "remeda"
 import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
-import { useDialog, type DialogContext } from "@tui/ui/dialog"
+import { useDialog } from "@tui/ui/dialog"
 import { useSDK } from "../context/sdk"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { Link } from "../ui/link"
@@ -10,6 +10,7 @@ import { useTheme } from "../context/theme"
 import { useLocal } from "@tui/context/local"
 import { TextAttributes } from "@opentui/core"
 import type { ProviderAuthAuthorization, ProviderAuthMethod } from "@opencode-ai/sdk/v2"
+import { DialogModel } from "./dialog-model"
 import { useKeyboard } from "@opentui/solid"
 import { Clipboard } from "@tui/util/clipboard"
 import { useToast } from "../ui/toast"
@@ -17,7 +18,6 @@ import { CONSOLE_MANAGED_ICON, isConsoleManagedProvider } from "@tui/util/provid
 import { getVisibleProviderAuthMethods, hasStoredProviderCredential } from "@tui/util/provider-auth"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
 import { isAgencySwarmFrameworkMode, isSupportedAgencyAuthProvider } from "../session-error"
-import { writeEnvKey, readEnvKey } from "@tui/util/env-file"
 import { errorMessage as toErrorMessage } from "@/util/error"
 import open from "open"
 import type { Provider } from "@opencode-ai/sdk/v2"
@@ -29,142 +29,6 @@ const PROVIDER_PRIORITY: Record<string, number> = {
   google: 3,
   "opencode-go": 4,
   opencode: 100,
-}
-
-// ── Add-ons ────────────────────────────────────────────────────────────────────
-// Mirrors onboard.py ADD_ONS. excludeFor lists provider IDs that already supply
-// this key (e.g. user who picked Anthropic doesn't need the Anthropic add-on).
-
-type AddonKeySpec = { env: string; label: string }
-type Addon = { id: string; name: string; description: string; keys: AddonKeySpec[]; excludeFor: string[] }
-
-const ADDONS: Addon[] = [
-  {
-    id: "search",
-    name: "Web Search",
-    description: "Web, Scholar & product search for all agents",
-    keys: [{ env: "SEARCH_API_KEY", label: "SearchAPI key  (searchapi.io)" }],
-    excludeFor: [],
-  },
-  {
-    id: "anthropic",
-    name: "Anthropic Claude  —  better slides quality",
-    description: "Claude produces significantly better slide HTML output",
-    keys: [{ env: "ANTHROPIC_API_KEY", label: "Anthropic API key  (console.anthropic.com)" }],
-    excludeFor: ["anthropic"],
-  },
-  {
-    id: "composio",
-    name: "Composio  —  10,000+ integrations",
-    description: "Gmail, Slack, GitHub, HubSpot, Google Calendar and more",
-    keys: [
-      { env: "COMPOSIO_API_KEY", label: "Composio API key  (composio.dev)" },
-      { env: "COMPOSIO_USER_ID", label: "Composio user ID  (composio.dev)" },
-    ],
-    excludeFor: [],
-  },
-  {
-    id: "google",
-    name: "Google Gemini  —  image gen & Veo video",
-    description: "Gemini image generation/editing and Veo video generation",
-    keys: [{ env: "GOOGLE_API_KEY", label: "Google AI API key  (aistudio.google.com)" }],
-    excludeFor: ["google"],
-  },
-  {
-    id: "fal",
-    name: "Fal.ai  —  Seedance video & background removal",
-    description: "Seedance 1.5 Pro video gen, video editing, background removal",
-    keys: [{ env: "FAL_KEY", label: "Fal.ai API key  (fal.ai/dashboard/keys)" }],
-    excludeFor: [],
-  },
-  {
-    id: "stock",
-    name: "Stock photos  —  Pexels / Pixabay / Unsplash",
-    description: "Image search for the Slides Agent",
-    keys: [
-      { env: "PEXELS_API_KEY", label: "Pexels API key  (pexels.com/api)" },
-      { env: "PIXABAY_API_KEY", label: "Pixabay API key  (pixabay.com/api/docs)" },
-      { env: "UNSPLASH_ACCESS_KEY", label: "Unsplash access key  (unsplash.com/developers)" },
-    ],
-    excludeFor: [],
-  },
-]
-
-/** Prompt for each key of each selected add-on sequentially, writing to .env. */
-async function collectAddonKeys(
-  dialog: DialogContext,
-  selectedAddons: Addon[],
-): Promise<void> {
-  for (const addon of selectedAddons) {
-    for (const keySpec of addon.keys) {
-      const existing = readEnvKey(keySpec.env)
-      const value = await DialogPrompt.show(dialog, keySpec.label, {
-        placeholder: existing ? "(already set — leave blank to keep)" : keySpec.env,
-        value: "",
-      })
-      if (value?.trim()) writeEnvKey(keySpec.env, value.trim())
-    }
-  }
-}
-
-/** Multi-select add-ons dialog shown after successful provider auth. */
-export function DialogAddons(props: { providerID: string; onDone: () => void }) {
-  const dialog = useDialog()
-  const { theme } = useTheme()
-
-  const available = ADDONS.filter((a) => !a.excludeFor.includes(props.providerID))
-
-  if (available.length === 0) {
-    props.onDone()
-    return <></>
-  }
-
-  const [checked, setChecked] = createSignal(new Set<string>())
-
-  const toggle = (id: string) => {
-    setChecked((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const options = createMemo<DialogSelectOption<string>[]>(() => {
-    const count = checked().size
-    return [
-      {
-        title: "Continue",
-        value: "__continue__",
-        description: count > 0 ? `${count} add-on${count !== 1 ? "s" : ""} selected` : "Skip add-ons",
-        category: "Action",
-        onSelect: () => {
-          const selected = available.filter((a) => checked().has(a.id))
-          void collectAddonKeys(dialog, selected).then(() => props.onDone())
-        },
-      },
-      ...available.map((addon) => ({
-        title: addon.name,
-        value: addon.id,
-        description: addon.description,
-        category: "Add-ons",
-        gutter: checked().has(addon.id)
-          ? <text fg={theme.success}>✓</text>
-          : <text fg={theme.textMuted}>○</text>,
-        onSelect: (_ctx: DialogContext) => {
-          toggle(addon.id)
-        },
-      })),
-    ]
-  })
-
-  return (
-    <DialogSelect
-      title="Enable add-ons  (optional)"
-      options={options()}
-      skipFilter
-    />
-  )
 }
 
 export function createDialogProviderOptions() {
@@ -382,6 +246,9 @@ export function DialogAuth() {
   const dialog = useDialog()
   const sync = useSync()
   const local = useLocal()
+  useKeyboard((evt) => {
+    closeDialogAuthOnEscape(dialog, evt)
+  })
   const frameworkMode = createMemo(() =>
     isAgencySwarmFrameworkMode({
       currentProviderID: local.model.current()?.providerID,
@@ -425,6 +292,49 @@ export function DialogAuth() {
   )
 }
 
+export function closeDialogAuthOnEscape(
+  dialog: Pick<ReturnType<typeof useDialog>, "clear">,
+  evt: {
+    name?: string
+    preventDefault(): void
+    stopPropagation(): void
+  },
+) {
+  if (evt.name !== "escape") return false
+  evt.preventDefault()
+  evt.stopPropagation()
+  dialog.clear()
+  return true
+}
+
+/** After auth in Agency Swarm mode, offer model selection (CLI model drives `client_config` for that provider). */
+function DialogPostAuthModelChoice(props: { providerID: string }) {
+  const dialog = useDialog()
+  const sync = useSync()
+  const providerName = createMemo(() => {
+    const p = sync.data.provider_next.all.find((x) => x.id === props.providerID)
+    return p?.name ?? props.providerID
+  })
+  return (
+    <DialogSelect
+      title={`${providerName()} connected`}
+      options={[
+        {
+          title: "Select model",
+          value: "model",
+          description: "Choose which model to use for this session",
+          onSelect: () => dialog.replace(() => <DialogModel providerID={props.providerID} />),
+        },
+        {
+          title: "Done",
+          value: "done",
+          description: "Keep your current model selection",
+          onSelect: () => dialog.clear(),
+        },
+      ]}
+    />
+  )
+}
 
 type Option =
   | {
@@ -865,12 +775,11 @@ function AutoMethod(props: AutoMethodProps) {
     try {
       await sdk.client.instance.dispose()
       await sync.bootstrap()
-      dialog.replace(() => (
-        <DialogAddons
-          providerID={props.providerID}
-          onDone={() => dialog.clear()}
-        />
-      ))
+      if (frameworkMode()) {
+        dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
+        return
+      }
+      dialog.replace(() => <DialogModel providerID={props.providerID} />)
     } catch (error) {
       const message = toErrorMessage(error)
       setError(message)
@@ -920,8 +829,16 @@ function CodeMethod(props: CodeMethodProps) {
   const sdk = useSDK()
   const sync = useSync()
   const dialog = useDialog()
+  const local = useLocal()
   const toast = useToast()
   const [error, setError] = createSignal<string>()
+  const frameworkMode = createMemo(() =>
+    isAgencySwarmFrameworkMode({
+      currentProviderID: local.model.current()?.providerID,
+      configuredModel: sync.data.config.model,
+      agentModel: local.agent.current()?.model,
+    }),
+  )
 
   return (
     <DialogPrompt
@@ -937,12 +854,11 @@ function CodeMethod(props: CodeMethodProps) {
           try {
             await sdk.client.instance.dispose()
             await sync.bootstrap()
-            dialog.replace(() => (
-              <DialogAddons
-                providerID={props.providerID}
-                onDone={() => dialog.clear()}
-              />
-            ))
+            if (frameworkMode()) {
+              dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
+              return
+            }
+            dialog.replace(() => <DialogModel providerID={props.providerID} />)
           } catch (error) {
             const message = toErrorMessage(error)
             setError(message)
@@ -982,9 +898,17 @@ function ApiMethod(props: ApiMethodProps) {
   const dialog = useDialog()
   const sdk = useSDK()
   const sync = useSync()
+  const local = useLocal()
   const toast = useToast()
   const { theme } = useTheme()
   const [error, setError] = createSignal<string>()
+  const frameworkMode = createMemo(() =>
+    isAgencySwarmFrameworkMode({
+      currentProviderID: local.model.current()?.providerID,
+      configuredModel: sync.data.config.model,
+      agentModel: local.agent.current()?.model,
+    }),
+  )
   const description = () => {
     const builtin =
       {
@@ -1047,12 +971,11 @@ function ApiMethod(props: ApiMethodProps) {
         try {
           await sdk.client.instance.dispose()
           await sync.bootstrap()
-          dialog.replace(() => (
-            <DialogAddons
-              providerID={props.providerID}
-              onDone={() => dialog.clear()}
-            />
-          ))
+          if (frameworkMode()) {
+            dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
+            return
+          }
+          dialog.replace(() => <DialogModel providerID={props.providerID} />)
         } catch (error) {
           const message = toErrorMessage(error)
           setError(message)
