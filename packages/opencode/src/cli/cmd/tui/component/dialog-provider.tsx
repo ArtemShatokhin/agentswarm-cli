@@ -775,11 +775,7 @@ function AutoMethod(props: AutoMethodProps) {
     try {
       await sdk.client.instance.dispose()
       await sync.bootstrap()
-      if (frameworkMode()) {
-        dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
-        return
-      }
-      dialog.replace(() => <DialogModel providerID={props.providerID} />)
+      dialog.clear()
     } catch (error) {
       const message = toErrorMessage(error)
       setError(message)
@@ -854,11 +850,7 @@ function CodeMethod(props: CodeMethodProps) {
           try {
             await sdk.client.instance.dispose()
             await sync.bootstrap()
-            if (frameworkMode()) {
-              dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
-              return
-            }
-            dialog.replace(() => <DialogModel providerID={props.providerID} />)
+            dialog.clear()
           } catch (error) {
             const message = toErrorMessage(error)
             setError(message)
@@ -971,11 +963,7 @@ function ApiMethod(props: ApiMethodProps) {
         try {
           await sdk.client.instance.dispose()
           await sync.bootstrap()
-          if (frameworkMode()) {
-            dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
-            return
-          }
-          dialog.replace(() => <DialogModel providerID={props.providerID} />)
+          dialog.clear()
         } catch (error) {
           const message = toErrorMessage(error)
           setError(message)

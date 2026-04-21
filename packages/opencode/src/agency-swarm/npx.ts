@@ -624,8 +624,7 @@ export async function prepareProjectLaunch(project: AgencyProject): Promise<Prep
 }
 
 async function registerGlobalCommand(directory: string): Promise<void> {
-  // Use the custom binary path set by bin/openswarm (downloaded from GitHub releases)
-  const agentswarmBin = process.env.AGENTSWARM_BIN_PATH
+  const agentswarmBin = process.env.AGENTSWARM_BIN_PATH ?? process.execPath
   if (!agentswarmBin || !(await Filesystem.exists(agentswarmBin))) return
 
   const prefixResult = await runCommand(["npm", "prefix", "-g"])
