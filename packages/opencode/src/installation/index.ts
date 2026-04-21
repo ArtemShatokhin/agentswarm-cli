@@ -16,6 +16,7 @@ import semver from "semver"
 
 export namespace Installation {
   const log = Log.create({ service: "installation" })
+  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
 
   export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
 
@@ -166,7 +167,7 @@ export namespace Installation {
           const pkg = "agentswarm-cli"
 
           const checks: Array<{ name: Method; command: () => Effect.Effect<string> }> = [
-            { name: "npm", command: () => text(["npm", "list", "-g", "--depth=0"]) },
+            { name: "npm", command: () => text([npmCmd, "list", "-g", "--depth=0"]) },
             { name: "yarn", command: () => text(["yarn", "global", "list"]) },
             { name: "pnpm", command: () => text(["pnpm", "list", "-g", "--depth=0"]) },
             { name: "bun", command: () => text(["bun", "pm", "ls", "-g"]) },
@@ -201,7 +202,7 @@ export namespace Installation {
           }
 
           if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm" || detectedMethod === "yarn") {
-            const r = (yield* text(["npm", "config", "get", "registry"])).trim()
+            const r = (yield* text([npmCmd, "config", "get", "registry"])).trim()
             const reg = r || "https://registry.npmjs.org"
             const registry = reg.endsWith("/") ? reg.slice(0, -1) : reg
             const channel = CHANNEL
@@ -244,7 +245,7 @@ export namespace Installation {
               result = yield* upgradeCurl(target)
               break
             case "npm":
-              result = yield* run(["npm", "install", "-g", `agentswarm-cli@${target}`])
+              result = yield* run([npmCmd, "install", "-g", `agentswarm-cli@${target}`])
               break
             case "yarn":
               result = yield* run(["yarn", "global", "add", `agentswarm-cli@${target}`])

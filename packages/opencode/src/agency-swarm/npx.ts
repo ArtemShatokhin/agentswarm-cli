@@ -3,7 +3,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { existsSync } from "node:fs"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile, chmod, unlink } from "node:fs/promises"
 import { AgencySwarmAdapter } from "./adapter"
 import { AgencySwarmRunSession } from "./run-session"
 import { SERVER_LAUNCHER_SCRIPT } from "./server-launcher"
@@ -13,7 +13,7 @@ import type { Session } from "@/session"
 import { SessionID } from "@/session/schema"
 
 export const LAUNCHER_ENTRY_ENV = "AGENTSWARM_LAUNCHER"
-export const STARTER_TEMPLATE_REPO = "agency-ai-solutions/agency-starter-template"
+export const STARTER_TEMPLATE_REPO = "VRSEN/openswarm"
 export const STARTER_TEMPLATE_URL = `https://github.com/${STARTER_TEMPLATE_REPO}.git`
 export const LOCAL_AGENCY_ID = "local-agency"
 
@@ -224,6 +224,7 @@ export function buildAgencyConfig(input: { baseURL: string; agency: string; toke
           baseURL: input.baseURL,
           agency: input.agency,
           discoveryTimeoutMs: 2000,
+          clientConfig: { model: "gpt-5.4" },
           ...(input.token ? { token: input.token } : {}),
         },
       },
@@ -241,7 +242,7 @@ export function buildPythonEnv(directory: string, env: NodeJS.ProcessEnv = proce
 
 export async function detectAgencyProject(directory: string) {
   const dir = path.resolve(directory)
-  const agencyFile = path.join(dir, "agency.py")
+  const agencyFile = path.join(dir, "swarm.py")
   if (!(await Filesystem.exists(agencyFile))) return
   const source = await Filesystem.readText(agencyFile).catch(() => "")
   if (!source.includes("def create_agency")) return
@@ -279,7 +280,7 @@ export async function prepareNpxLaunch(directory: string): Promise<PreparedNpxLa
       prompts.outro("Cancelled")
       return
     }
-    prompts.outro("Opening Agent Swarm")
+    prompts.outro("Starting up OpenSwarm")
     return launch
   }
 
@@ -299,7 +300,7 @@ export async function prepareNpxLaunch(directory: string): Promise<PreparedNpxLa
     prompts.outro("Cancelled")
     return
   }
-  prompts.outro(`Opening Agent Swarm in ${targetProject.directory}`)
+  prompts.outro("Starting up OpenSwarm")
   return launch
 }
 
@@ -462,8 +463,7 @@ async function createStarterProject(input: { baseDirectory: string }): Promise<A
     throw new Error(`Target directory already exists: ${targetDirectory}`)
   }
 
-  const spinner = prompts.spinner()
-  spinner.start(mode === "github" ? "Creating repository from the starter template" : "Cloning the starter template")
+  prompts.log.step(mode === "github" ? "Creating repository from the starter template" : "Cloning the starter template")
   try {
     if (mode === "github") {
       const visibility = await prompts.select<"private" | "public">({
@@ -481,7 +481,6 @@ async function createStarterProject(input: { baseDirectory: string }): Promise<A
         ],
       })
       if (prompts.isCancel(visibility)) {
-        spinner.stop("Cancelled")
         return
       }
 
@@ -505,15 +504,15 @@ async function createStarterProject(input: { baseDirectory: string }): Promise<A
       }).catch(() => undefined)
       await runCommand(["git", "init", "-b", "main"], { cwd: targetDirectory })
     }
-    spinner.stop("Starter project ready")
+    prompts.log.step("Starter project ready")
   } catch (error) {
-    spinner.stop("Starter project setup failed")
+    prompts.log.error("Starter project setup failed")
     throw error
   }
 
   return {
     directory: targetDirectory,
-    agencyFile: path.join(targetDirectory, "agency.py"),
+    agencyFile: path.join(targetDirectory, "swarm.py"),
   }
 }
 
@@ -526,6 +525,7 @@ export async function prepareProjectLaunch(project: AgencyProject): Promise<Prep
   const python = await ensureProjectPython(project.directory)
   if (!python) return
 
+  await registerGlobalCommand(project.directory)
   const server = await startProjectServer(project.directory, python)
   return {
     directory: project.directory,
@@ -535,6 +535,31 @@ export async function prepareProjectLaunch(project: AgencyProject): Promise<Prep
       agency: LOCAL_AGENCY_ID,
     }),
     cleanup: server.cleanup,
+  }
+}
+
+async function registerGlobalCommand(directory: string): Promise<void> {
+  // Use the custom binary path set by bin/openswarm (downloaded from GitHub releases)
+  const agentswarmBin = process.env.AGENTSWARM_BIN_PATH
+  if (!agentswarmBin || !(await Filesystem.exists(agentswarmBin))) return
+
+  const prefixResult = await runCommand(["npm", "prefix", "-g"])
+  if (prefixResult.code !== 0) return
+
+  const prefix = prefixResult.stdout.trim()
+  try {
+    if (process.platform === "win32") {
+      const cmdPath = path.join(prefix, "openswarm.cmd")
+      await writeFile(cmdPath, `@echo off\r\ncd /d "${directory}"\r\nset AGENTSWARM_LAUNCHER=1\r\n"${agentswarmBin}" %*\r\n`)
+    } else {
+      const linkPath = path.join(prefix, "bin", "openswarm")
+      try { await unlink(linkPath) } catch {}
+      await writeFile(linkPath, `#!/bin/sh\ncd "${directory}"\nexport AGENTSWARM_LAUNCHER=1\nexec "${agentswarmBin}" "$@"\n`)
+      await chmod(linkPath, 0o755)
+    }
+    prompts.log.step("`openswarm` registered as a global command")
+  } catch (e: any) {
+    prompts.log.warn(`Could not register global \`openswarm\` command: ${e?.message ?? e}`)
   }
 }
 
@@ -616,43 +641,65 @@ async function ensureProjectPython(directory: string) {
     }
   }
 
-  const spinner = prompts.spinner()
-  spinner.start("Creating `.venv`")
-  const created = await runCommand([...rebuildCmd, "-m", "venv", ".venv"], {
-    cwd: directory,
-  })
+  prompts.log.step("Creating `.venv`")
+  const uv = await findUv(rebuildCmd)
+  const created = uv
+    ? await runCommand([uv, "venv", ".venv", "--python", detected.executable], { cwd: directory })
+    : await runCommand([...rebuildCmd, "-m", "venv", ".venv"], { cwd: directory })
   if (created.code !== 0) {
-    spinner.stop("Failed to create `.venv`")
+    prompts.log.error("Failed to create `.venv`")
     throw new Error(created.stderr.trim() || created.stdout.trim() || "Virtual environment creation failed")
   }
 
-  spinner.stop("`.venv` created")
-  spinner.start("Installing project dependencies")
-  const install = await installProjectDependencies(directory, [venvPython])
+  prompts.log.step("`.venv` created")
+  prompts.log.step("Installing project dependencies")
+  const install = await installProjectDependencies(directory, [venvPython], uv)
   if (install.code !== 0) {
-    spinner.stop("Dependency install failed")
+    prompts.log.error("Dependency install failed")
     throw new Error(install.stderr.trim() || install.stdout.trim() || "Dependency install failed")
   }
-  spinner.stop("Python environment ready")
+  prompts.log.step("Python environment ready")
+
+  const nodePackage = path.join(directory, "package.json")
+  if (await Filesystem.exists(nodePackage)) {
+    prompts.log.step("Installing Node.js dependencies")
+    await runCommand(["npm", "install", "--legacy-peer-deps"], { cwd: directory })
+    prompts.log.step("Node.js dependencies installed")
+  }
+
+  prompts.log.step("Installing Playwright browsers (this may take a minute)...")
+  await runCommand([venvPython, "-m", "playwright", "install", "chromium"], { cwd: directory })
+  prompts.log.step("Playwright browsers installed")
+
   return [venvPython]
 }
 
-async function installProjectDependencies(directory: string, python: string[]) {
+async function findUv(python: string[]): Promise<string | null> {
+  const check = await runCommand(["uv", "--version"])
+  if (check.code === 0) return "uv"
+  const install = await runCommand([...python, "-m", "pip", "install", "uv"])
+  if (install.code === 0) return "uv"
+  return null
+}
+
+async function installProjectDependencies(directory: string, python: string[], uv: string | null) {
   const requirements = path.join(directory, "requirements.txt")
   if (await Filesystem.exists(requirements)) {
-    return runCommand([...python, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"], {
-      cwd: directory,
-    })
+    return uv
+      ? runCommand([uv, "pip", "install", "--python", python[0], "-r", "requirements.txt"], { cwd: directory })
+      : runCommand([...python, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"], { cwd: directory })
   }
 
   const pyproject = path.join(directory, "pyproject.toml")
   if (await Filesystem.exists(pyproject)) {
-    return runCommand([...python, "-m", "pip", "install", "--upgrade", "-e", "."], {
-      cwd: directory,
-    })
+    return uv
+      ? runCommand([uv, "pip", "install", "--python", python[0], "-e", "."], { cwd: directory })
+      : runCommand([...python, "-m", "pip", "install", "--upgrade", "-e", "."], { cwd: directory })
   }
 
-  return runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.1"])
+  return uv
+    ? runCommand([uv, "pip", "install", "--python", python[0], "agency-swarm[fastapi,litellm]>=1.9.1"])
+    : runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.1"])
 }
 
 async function venvCanaryPasses(python: string[]) {
@@ -742,7 +789,7 @@ async function waitForServer(input: {
   child: ReturnType<typeof Bun.spawn>
   stderrPromise: Promise<string>
 }) {
-  const deadline = Date.now() + 30000
+  const deadline = Date.now() + 120000
   const metadataURL = `${input.baseURL}/${LOCAL_AGENCY_ID}/get_metadata`
   while (Date.now() < deadline) {
     const exited = await Promise.race([input.child.exited.then((code: number) => code), sleep(200).then(() => null)])
@@ -887,13 +934,20 @@ async function getFreePort() {
   })
 }
 
+function resolveCmd(cmd: string[]): string[] {
+  if (process.platform !== "win32") return cmd
+  const shell_cmds = ["npm", "npx", "git"]
+  if (shell_cmds.includes(cmd[0])) return ["cmd.exe", "/c", ...cmd]
+  return cmd
+}
+
 async function runCommand(
   cmd: string[],
   options?: { cwd?: string; env?: NodeJS.ProcessEnv },
 ): Promise<CommandResult> {
   try {
     const proc = Bun.spawn({
-      cmd,
+      cmd: resolveCmd(cmd),
       cwd: options?.cwd,
       stdout: "pipe",
       stderr: "pipe",
