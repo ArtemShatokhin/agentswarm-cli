@@ -832,9 +832,6 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     {
       title: "Re-run the setup wizard",
       value: "app.onboard",
-      slash: {
-        name: "onboard",
-      },
       onSelect: () => {
         const flagPath = process.env["OPENSWARM_ONBOARD_FLAG"]
         if (flagPath) {
