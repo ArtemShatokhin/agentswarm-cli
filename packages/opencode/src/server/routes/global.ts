@@ -289,9 +289,6 @@ export const GlobalRoutes = lazy(() =>
       ),
       async (c) => {
         const method = await Installation.method()
-        if (method === "unknown") {
-          return c.json({ success: false, error: "Unknown installation method" }, 400)
-        }
         const target = c.req.valid("json").target || (await Installation.latest(method))
         const result = await Installation.upgrade(method, target)
           .then(() => ({ success: true as const, version: target }))
