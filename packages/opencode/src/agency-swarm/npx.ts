@@ -664,7 +664,23 @@ async function ensureProjectPython(directory: string) {
     }
   }
 
+  // Install Node Playwright browsers into the project-local cache so the HTML→PPTX
+  // exporter (Node) can launch Chromium without requiring manual `npx playwright install`.
+  // Keep it under <project>/.playwright-browsers (stable, not npm's ephemeral _npx cache).
   prompts.log.step("Installing Playwright browsers (this may take a minute)...")
+  try {
+    const browsersPath = path.join(directory, ".playwright-browsers")
+    const npmCmd = process.platform === "win32" ? "npx.cmd" : "npx"
+    const installNodePw = await runCommand([npmCmd, "-y", "playwright", "install", "chromium", "chromium-headless-shell"], {
+      cwd: directory,
+      env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath },
+    })
+    if (installNodePw.code !== 0) {
+      prompts.log.warn(`Playwright (Node) install: ${installNodePw.stderr.trim() || installNodePw.stdout.trim()}`)
+    }
+  } catch (error) {
+    prompts.log.warn(`Playwright (Node) install skipped: ${error instanceof Error ? error.message : String(error)}`)
+  }
   await runCommand([venvPython, "-m", "playwright", "install", "chromium"], { cwd: directory })
   prompts.log.step("Playwright browsers installed")
 
