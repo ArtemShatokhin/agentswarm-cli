@@ -504,6 +504,40 @@ export async function prepareProjectLaunch(project: AgencyProject): Promise<Prep
   }
 }
 
+export function buildGlobalCommandScript(input: {
+  directory: string
+  agentswarmBin: string
+  platform?: NodeJS.Platform
+}) {
+  if ((input.platform ?? process.platform) === "win32") {
+    return [
+      "@echo off",
+      `if exist "${input.directory}\\." (`,
+      `  cd /d "${input.directory}"`,
+      ") else (",
+      `  echo openswarm: remembered project directory no longer exists: ${input.directory}`,
+      "  echo openswarm: starting from the current directory instead.",
+      ")",
+      "set AGENTSWARM_LAUNCHER=1",
+      `"${input.agentswarmBin}" %*`,
+      "",
+    ].join("\r\n")
+  }
+
+  return [
+    "#!/bin/sh",
+    `if [ -d "${input.directory}" ]; then`,
+    `  cd "${input.directory}" || exit $?`,
+    "else",
+    `  echo "openswarm: remembered project directory no longer exists: ${input.directory}" >&2`,
+    '  echo "openswarm: starting from the current directory instead." >&2',
+    "fi",
+    "export AGENTSWARM_LAUNCHER=1",
+    `exec "${input.agentswarmBin}" "$@"`,
+    "",
+  ].join("\n")
+}
+
 async function registerGlobalCommand(directory: string): Promise<void> {
   const agentswarmBin = process.env.AGENTSWARM_BIN_PATH ?? process.execPath
   if (!agentswarmBin || !(await Filesystem.exists(agentswarmBin))) return
@@ -515,11 +549,11 @@ async function registerGlobalCommand(directory: string): Promise<void> {
   try {
     if (process.platform === "win32") {
       const cmdPath = path.join(prefix, "openswarm.cmd")
-      await writeFile(cmdPath, `@echo off\r\ncd /d "${directory}"\r\nset AGENTSWARM_LAUNCHER=1\r\n"${agentswarmBin}" %*\r\n`)
+      await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin }))
     } else {
       const linkPath = path.join(prefix, "bin", "openswarm")
       try { await unlink(linkPath) } catch {}
-      await writeFile(linkPath, `#!/bin/sh\ncd "${directory}"\nexport AGENTSWARM_LAUNCHER=1\nexec "${agentswarmBin}" "$@"\n`)
+      await writeFile(linkPath, buildGlobalCommandScript({ directory, agentswarmBin }))
       await chmod(linkPath, 0o755)
     }
     prompts.log.step("`openswarm` registered as a global command")

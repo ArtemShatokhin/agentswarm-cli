@@ -5,6 +5,7 @@ import path from "node:path"
 import * as prompts from "@clack/prompts"
 import {
   buildAgencyConfig,
+  buildGlobalCommandScript,
   buildPythonEnv,
   detectAgencyProject,
   LAUNCHER_ENTRY_ENV,
@@ -138,6 +139,28 @@ describe("agency-swarm npx onboarding", () => {
     })
 
     expect(env.PYTHONPATH).toBe(`/tmp/project${path.delimiter}/existing/path`)
+  })
+
+  test("global command wrapper falls back when the remembered project directory is gone", () => {
+    const winScript = buildGlobalCommandScript({
+      directory: "C:\\Users\\runner\\openswarm",
+      agentswarmBin: "C:\\Users\\runner\\AppData\\Roaming\\npm\\agentswarm.cmd",
+      platform: "win32",
+    })
+    expect(winScript).toContain('if exist "C:\\Users\\runner\\openswarm\\." (')
+    expect(winScript).toContain("remembered project directory no longer exists: C:\\Users\\runner\\openswarm")
+    expect(winScript).toContain("starting from the current directory instead.")
+    expect(winScript).not.toStartWith('@echo off\r\ncd /d "C:\\Users\\runner\\openswarm"')
+
+    const posixScript = buildGlobalCommandScript({
+      directory: "/home/runner/openswarm",
+      agentswarmBin: "/home/runner/.bun/bin/agentswarm",
+      platform: "linux",
+    })
+    expect(posixScript).toContain('if [ -d "/home/runner/openswarm" ]; then')
+    expect(posixScript).toContain('echo "openswarm: remembered project directory no longer exists: /home/runner/openswarm" >&2')
+    expect(posixScript).toContain('exec "/home/runner/.bun/bin/agentswarm" "$@"')
+    expect(posixScript).not.toStartWith('#!/bin/sh\ncd "/home/runner/openswarm"')
   })
 
   test("prepareProjectLaunch installs LiteLLM extras when no dependency manifest exists", async () => {
