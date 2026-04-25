@@ -10,7 +10,7 @@ import { BusEvent } from "@/bus/bus-event"
 import { Flag } from "../flag/flag"
 import { Log } from "../util/log"
 import { CHANNEL as channel, VERSION as version } from "./meta"
-import { AgencyBrand } from "@/agency-swarm/brand"
+import { InstallationDistribution } from "./distribution"
 
 import semver from "semver"
 
@@ -60,7 +60,7 @@ export namespace Installation {
 
   export const VERSION = version
   export const CHANNEL = channel
-  export const USER_AGENT = `agentswarm-cli/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
+  export const USER_AGENT = `${InstallationDistribution.packageName}/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
 
   export function isPreview() {
     return CHANNEL !== "latest"
@@ -133,7 +133,7 @@ export namespace Installation {
 
         const upgradeCurl = Effect.fnUntraced(
           function* (target: string) {
-            const response = yield* httpOk.execute(HttpClientRequest.get(install))
+            const response = yield* httpOk.execute(HttpClientRequest.get(InstallationDistribution.installURL))
             const body = yield* response.text
             const bodyBytes = new TextEncoder().encode(body)
             const proc = ChildProcess.make("bash", [], {
@@ -154,7 +154,7 @@ export namespace Installation {
         )
 
         const methodImpl = Effect.fn("Installation.method")(function* () {
-          if (process.execPath.includes(path.join(AgencyBrand.workspace, "bin"))) return "curl" as Method
+          if (process.execPath.includes(path.join(InstallationDistribution.installDir, "bin"))) return "curl" as Method
           if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
           const exec = process.execPath.toLowerCase()
           const pkg = "@vrsen/openswarm"
@@ -176,7 +176,7 @@ export namespace Installation {
 
           for (const check of checks) {
             const output = yield* check.command()
-            const installedName = pkg
+            const installedName = InstallationDistribution.packageName
             if (output.includes(installedName)) {
               return check.name
             }
@@ -187,9 +187,9 @@ export namespace Installation {
 
         const latestImpl = Effect.fn("Installation.latest")(function* (_installMethod?: Method) {
           const response = yield* httpOk.execute(
-            HttpClientRequest.get(`https://api.github.com/repos/${repo}/releases/latest`).pipe(
-              HttpClientRequest.acceptJson,
-            ),
+            HttpClientRequest.get(
+              `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
+            ).pipe(HttpClientRequest.acceptJson),
           )
           const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
           return data.tag_name.replace(/^v/, "")

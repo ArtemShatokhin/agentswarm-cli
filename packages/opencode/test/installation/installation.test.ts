@@ -5,6 +5,9 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Installation } from "../../src/installation"
 
 const encoder = new TextEncoder()
+const expectedPackageName = "agentswarm-cli"
+const expectedReleaseRepo = "VRSEN/agentswarm-cli"
+const expectedInstallDir = ".opencode"
 
 function mockHttpClient(handler: (request: HttpClientRequest.HttpClientRequest) => Response) {
   const client = HttpClient.make((request) => Effect.succeed(HttpClientResponse.fromWeb(request, handler(request))))
@@ -48,14 +51,42 @@ function testLayer(
 }
 
 describe("installation", () => {
+  describe("method", () => {
+    test("detects curl installs from the installer directory", async () => {
+      const originalExecPath = process.execPath
+      Object.defineProperty(process, "execPath", {
+        value: `/Users/test/${expectedInstallDir}/bin/agentswarm`,
+        configurable: true,
+      })
+
+      try {
+        const layer = testLayer(() => jsonResponse({}))
+        const result = await Effect.runPromise(
+          Installation.Service.use((svc) => svc.method()).pipe(Effect.provide(layer)),
+        )
+        expect(result).toBe("curl")
+      } finally {
+        Object.defineProperty(process, "execPath", {
+          value: originalExecPath,
+          configurable: true,
+        })
+      }
+    })
+  })
+
   describe("latest", () => {
     test("reads release version from GitHub releases", async () => {
-      const layer = testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))
+      let requestURL = ""
+      const layer = testLayer((request) => {
+        requestURL = request.url
+        return jsonResponse({ tag_name: "v1.2.3" })
+      })
 
       const result = await Effect.runPromise(
         Installation.Service.use((svc) => svc.latest("unknown")).pipe(Effect.provide(layer)),
       )
       expect(result).toBe("1.2.3")
+      expect(requestURL).toBe(`https://api.github.com/repos/${expectedReleaseRepo}/releases/latest`)
     })
 
     test("strips v prefix from GitHub release tag", async () => {
@@ -68,8 +99,12 @@ describe("installation", () => {
     })
 
     test("reads npm registry versions", async () => {
+      let requestURL = ""
       const layer = testLayer(
-        () => jsonResponse({ version: "1.5.0" }),
+        (request) => {
+          requestURL = request.url
+          return jsonResponse({ version: "1.5.0" })
+        },
         (cmd, args) => {
           if (cmd === "npm" && args.includes("registry")) return "https://registry.npmjs.org\n"
           return ""
@@ -80,6 +115,7 @@ describe("installation", () => {
         Installation.Service.use((svc) => svc.latest("npm")).pipe(Effect.provide(layer)),
       )
       expect(result).toBe("1.5.0")
+      expect(requestURL).toBe(`https://registry.npmjs.org/${expectedPackageName}/${Installation.CHANNEL}`)
     })
 
     test("reads npm registry versions for bun method", async () => {
