@@ -16,6 +16,7 @@ import semver from "semver"
 
 export namespace Installation {
   const log = Log.create({ service: "installation" })
+  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
 
   export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
 
@@ -73,14 +74,7 @@ export namespace Installation {
     stderr: Schema.String,
   }) {}
 
-  // Response schemas for external version APIs
   const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
-  const NpmPackage = Schema.Struct({ version: Schema.String })
-  const BrewFormula = Schema.Struct({ versions: Schema.Struct({ stable: Schema.String }) })
-  const ChocoPackage = Schema.Struct({
-    d: Schema.Struct({ results: Schema.Array(Schema.Struct({ Version: Schema.String })) }),
-  })
-  const ScoopManifest = NpmPackage
 
   export interface Interface {
     readonly info: () => Effect.Effect<Info>
@@ -134,6 +128,9 @@ export namespace Installation {
           Effect.catch(() => Effect.succeed({ code: ChildProcessSpawner.ExitCode(1), stdout: "", stderr: "" })),
         )
 
+        const repo = "VRSEN/OpenSwarm"
+        const install = `https://raw.githubusercontent.com/${repo}/dev/install`
+
         const upgradeCurl = Effect.fnUntraced(
           function* (target: string) {
             const response = yield* httpOk.execute(HttpClientRequest.get(InstallationDistribution.installURL))
@@ -160,9 +157,10 @@ export namespace Installation {
           if (process.execPath.includes(path.join(InstallationDistribution.installDir, "bin"))) return "curl" as Method
           if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
           const exec = process.execPath.toLowerCase()
+          const pkg = "@vrsen/openswarm"
 
           const checks: Array<{ name: Method; command: () => Effect.Effect<string> }> = [
-            { name: "npm", command: () => text(["npm", "list", "-g", "--depth=0"]) },
+            { name: "npm", command: () => text([npmCmd, "list", "-g", "--depth=0"]) },
             { name: "yarn", command: () => text(["yarn", "global", "list"]) },
             { name: "pnpm", command: () => text(["pnpm", "list", "-g", "--depth=0"]) },
             { name: "bun", command: () => text(["bun", "pm", "ls", "-g"]) },
@@ -187,50 +185,7 @@ export namespace Installation {
           return "unknown" as Method
         })
 
-        const latestImpl = Effect.fn("Installation.latest")(function* (installMethod?: Method) {
-          const detectedMethod = installMethod || (yield* methodImpl())
-
-          if (detectedMethod === "brew") {
-            return yield* new UpgradeFailedError({
-              stderr: "agentswarm-cli is not published to Homebrew. Use npm, yarn, pnpm, bun, or curl instead.",
-            })
-          }
-
-          if (
-            detectedMethod === "npm" ||
-            detectedMethod === "bun" ||
-            detectedMethod === "pnpm" ||
-            detectedMethod === "yarn"
-          ) {
-            const r = (yield* text(["npm", "config", "get", "registry"])).trim()
-            const reg = r || "https://registry.npmjs.org"
-            const registry = reg.endsWith("/") ? reg.slice(0, -1) : reg
-            const channel = CHANNEL
-            const response = yield* httpOk.execute(
-              HttpClientRequest.get(`${registry}/${InstallationDistribution.packageName}/${channel}`).pipe(
-                HttpClientRequest.acceptJson,
-              ),
-            )
-            const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
-            return data.version
-          }
-
-          if (detectedMethod === "choco") {
-            const response = yield* httpOk.execute(
-              HttpClientRequest.get(
-                "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27opencode%27%20and%20IsLatestVersion&$select=Version",
-              ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
-            )
-            const data = yield* HttpClientResponse.schemaBodyJson(ChocoPackage)(response)
-            return data.d.results[0].Version
-          }
-
-          if (detectedMethod === "scoop") {
-            return yield* new UpgradeFailedError({
-              stderr: "agentswarm-cli is not published to Scoop. Use npm, yarn, pnpm, bun, or curl instead.",
-            })
-          }
-
+        const latestImpl = Effect.fn("Installation.latest")(function* (_installMethod?: Method) {
           const response = yield* httpOk.execute(
             HttpClientRequest.get(
               `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
@@ -247,16 +202,16 @@ export namespace Installation {
               result = yield* upgradeCurl(target)
               break
             case "npm":
-              result = yield* run(["npm", "install", "-g", `${InstallationDistribution.packageName}@${target}`])
+              result = yield* run([npmCmd, "install", "-g", `@vrsen/openswarm@${target}`])
               break
             case "yarn":
-              result = yield* run(["yarn", "global", "add", `${InstallationDistribution.packageName}@${target}`])
+              result = yield* run(["yarn", "global", "add", `@vrsen/openswarm@${target}`])
               break
             case "pnpm":
-              result = yield* run(["pnpm", "install", "-g", `${InstallationDistribution.packageName}@${target}`])
+              result = yield* run(["pnpm", "install", "-g", `@vrsen/openswarm@${target}`])
               break
             case "bun":
-              result = yield* run(["bun", "install", "-g", `${InstallationDistribution.packageName}@${target}`])
+              result = yield* run(["bun", "install", "-g", `@vrsen/openswarm@${target}`])
               break
             case "brew": {
               return yield* new UpgradeFailedError({
@@ -275,7 +230,8 @@ export namespace Installation {
               })
               break
             default:
-              return yield* new UpgradeFailedError({ stderr: `Unknown method: ${m}` })
+              // npx / unknown install — fall back to global npm install
+              result = yield* run([npmCmd, "install", "-g", `@vrsen/openswarm@${target}`])
           }
           if (!result || result.code !== 0) {
             const stderr = result?.stderr || ""

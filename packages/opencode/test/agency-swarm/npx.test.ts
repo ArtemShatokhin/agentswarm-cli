@@ -7,13 +7,11 @@ import {
   buildAgencyConfig,
   buildPythonEnv,
   detectAgencyProject,
-  formatProjectLabel,
   LAUNCHER_ENTRY_ENV,
   prepareProjectLaunch,
   resolveNpxAutoProject,
   shouldRunNpxOnboarding,
   summarizeBridgeStderr,
-  validateStarterName,
 } from "../../src/agency-swarm/npx"
 import { AgencySwarmRunSession } from "../../src/agency-swarm/run-session"
 import { Instance } from "../../src/project/instance"
@@ -1244,25 +1242,6 @@ describe("agency-swarm npx onboarding", () => {
     const project = await detectAgencyProject(dir.path)
 
     expect(project).toBeUndefined()
-  })
-
-  test("formatProjectLabel includes the full project path", () => {
-    const root = path.join("/tmp", "workspace", "agency")
-
-    expect(
-      formatProjectLabel({
-        directory: root,
-        agencyFile: path.join(root, "agency.py"),
-      }),
-    ).toBe(`Use detected Agency Swarm project (${root})`)
-  })
-
-  test("validateStarterName rejects existing target folders", async () => {
-    await using dir = await tmpdir()
-    await mkdir(path.join(dir.path, "my-agency"))
-
-    expect(validateStarterName(dir.path, "my-agency")).toBe("A folder with this name already exists")
-    expect(validateStarterName(dir.path, "new-agency")).toBeUndefined()
   })
 
   test("resolveNpxAutoProject uses session directory for explicit session resumes", async () => {

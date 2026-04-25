@@ -2,7 +2,8 @@ import { createMemo, createResource, createSignal, onCleanup, onMount, Show } fr
 import { useSync } from "@tui/context/sync"
 import { map, pipe, sortBy } from "remeda"
 import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
-import { useDialog } from "@tui/ui/dialog"
+import { useDialog, type DialogContext } from "@tui/ui/dialog"
+import { writeEnvKey, readEnvKey } from "@tui/util/env-file"
 import { useSDK } from "../context/sdk"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { Link } from "../ui/link"
@@ -251,6 +252,236 @@ function DialogRemoveCredential() {
   return <DialogSelect title="Remove credential" options={options()} />
 }
 
+// ── Add-ons ────────────────────────────────────────────────────────────────────
+// Mirrors onboard.py ADD_ONS. excludeFor lists provider IDs that already supply
+// this key (e.g. user who picked Anthropic doesn't need the Anthropic add-on).
+
+type AddonKeySpec = { env: string; label: string }
+type Addon = { id: string; name: string; description: string; keys: AddonKeySpec[]; excludeFor: string[] }
+
+const ADDONS: Addon[] = [
+  {
+    id: "search",
+    name: "Web Search",
+    description: "Web, Scholar & product search for all agents",
+    keys: [{ env: "SEARCH_API_KEY", label: "SearchAPI key  (searchapi.io)" }],
+    excludeFor: [],
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic Claude  —  better slides quality",
+    description: "Claude produces significantly better slide HTML output",
+    keys: [{ env: "ANTHROPIC_API_KEY", label: "Anthropic API key  (console.anthropic.com)" }],
+    excludeFor: ["anthropic"],
+  },
+  {
+    id: "composio",
+    name: "Composio  —  10,000+ integrations",
+    description: "Gmail, Slack, GitHub, HubSpot, Google Calendar and more",
+    keys: [
+      { env: "COMPOSIO_API_KEY", label: "Composio API key  (composio.dev)" },
+      { env: "COMPOSIO_USER_ID", label: "Composio user ID  (composio.dev)" },
+    ],
+    excludeFor: [],
+  },
+  {
+    id: "google",
+    name: "Google Gemini  —  image gen & Veo video",
+    description: "Gemini image generation/editing and Veo video generation",
+    keys: [{ env: "GOOGLE_API_KEY", label: "Google AI API key  (aistudio.google.com)" }],
+    excludeFor: ["google"],
+  },
+  {
+    id: "fal",
+    name: "Fal.ai  —  Seedance video & background removal",
+    description: "Seedance 1.5 Pro video gen, video editing, background removal",
+    keys: [{ env: "FAL_KEY", label: "Fal.ai API key  (fal.ai/dashboard/keys)" }],
+    excludeFor: [],
+  },
+  {
+    id: "pexels",
+    name: "Pexels  —  stock photos",
+    description: "Free stock photo search for the Slides Agent",
+    keys: [{ env: "PEXELS_API_KEY", label: "Pexels API key  (pexels.com/api)" }],
+    excludeFor: [],
+  },
+  {
+    id: "pixabay",
+    name: "Pixabay  —  stock photos & videos",
+    description: "Free stock photos and videos for the Slides Agent",
+    keys: [{ env: "PIXABAY_API_KEY", label: "Pixabay API key  (pixabay.com/api/docs)" }],
+    excludeFor: [],
+  },
+  {
+    id: "unsplash",
+    name: "Unsplash  —  stock photos",
+    description: "High-quality free stock photos for the Slides Agent",
+    keys: [{ env: "UNSPLASH_ACCESS_KEY", label: "Unsplash access key  (unsplash.com/developers)" }],
+    excludeFor: [],
+  },
+]
+
+/** Prompt for each key of each selected add-on sequentially, writing to .env. */
+async function collectAddonKeys(
+  dialog: DialogContext,
+  selectedAddons: Addon[],
+): Promise<void> {
+  for (const addon of selectedAddons) {
+    for (const keySpec of addon.keys) {
+      const existing = readEnvKey(keySpec.env)
+      const value = await DialogPrompt.show(dialog, keySpec.label, {
+        placeholder: existing ? "(already set — leave blank to keep)" : keySpec.env,
+        value: "",
+      })
+      if (value?.trim()) writeEnvKey(keySpec.env, value.trim())
+    }
+  }
+}
+
+/** Multi-select add-ons dialog shown after successful provider auth. */
+export function DialogAddons(props: { providerID: string; onDone: () => void }) {
+  const dialog = useDialog()
+  const { theme } = useTheme()
+
+  const available = ADDONS.filter((a) => !a.excludeFor.includes(props.providerID))
+
+  if (available.length === 0) {
+    props.onDone()
+    return <></>
+  }
+
+  const [checked, setChecked] = createSignal(new Set<string>())
+
+  const toggle = (id: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const options = createMemo<DialogSelectOption<string>[]>(() => {
+    const count = checked().size
+    return [
+      {
+        title: "Continue",
+        value: "__continue__",
+        description: count > 0 ? `${count} add-on${count !== 1 ? "s" : ""} selected` : "Skip add-ons",
+        category: "Action",
+        onSelect: () => {
+          const selected = available.filter((a) => checked().has(a.id))
+          void collectAddonKeys(dialog, selected).then(() => props.onDone())
+        },
+      },
+      ...available.map((addon) => ({
+        title: addon.name,
+        value: addon.id,
+        description: addon.description,
+        category: "Add-ons",
+        gutter: checked().has(addon.id)
+          ? <text fg={theme.success}>✓</text>
+          : <text fg={theme.textMuted}>○</text>,
+        onSelect: (_ctx: DialogContext) => {
+          toggle(addon.id)
+        },
+      })),
+    ]
+  })
+
+  return (
+    <DialogSelect
+      title="Enable add-ons  (optional)"
+      options={options()}
+      skipFilter
+    />
+  )
+}
+
+/** In framework mode, skip the provider list and go straight to the OpenAI auth method selection. */
+function DialogAuthOpenAI() {
+  const dialog = useDialog()
+  const sdk = useSDK()
+  const sync = useSync()
+  const toast = useToast()
+  const local = useLocal()
+  const frameworkMode = createMemo(() =>
+    isAgencySwarmFrameworkMode({
+      currentProviderID: local.model.current()?.providerID,
+      configuredModel: sync.data.config.model,
+      agentModel: local.agent.current()?.model,
+    }),
+  )
+
+  onMount(async () => {
+    const provider = sync.data.provider_next.all.find((p) => p.id === "openai")
+    if (!provider) {
+      dialog.clear()
+      return
+    }
+
+    const methods = getVisibleProviderAuthMethods(
+      "openai",
+      sync.data.provider_auth["openai"] ?? [{ type: "api", label: "API key" }],
+      { frameworkMode: frameworkMode() },
+    )
+    const visibleMethods = methods.length ? methods : [{ type: "api" as const, label: "API key" }]
+
+    let index: number | null = 0
+    if (visibleMethods.length > 1) {
+      index = await new Promise<number | null>((resolve) => {
+        dialog.replace(
+          () => (
+            <DialogSelect
+              title="Select OpenAI auth method"
+              options={visibleMethods.map((x, i) => ({ title: x.label, value: i }))}
+              onSelect={(option) => resolve(option.value)}
+            />
+          ),
+          () => resolve(null),
+        )
+      })
+    }
+    if (index == null) return
+    const method = visibleMethods[index]
+    if (method.type === "oauth") {
+      let inputs: Record<string, string> | undefined
+      if (method.prompts?.length) {
+        const value = await PromptsMethod({ dialog, prompts: method.prompts })
+        if (!value) return
+        inputs = value
+      }
+      const result = await sdk.client.provider.oauth.authorize({ providerID: "openai", method: index, inputs })
+      if (result.error) {
+        log.error("provider oauth authorize failed", { providerID: "openai", error: toErrorMessage(result.error) })
+        toast.show({ variant: "error", message: toErrorMessage(result.error), duration: 5000 })
+        return
+      }
+      if (result.data?.method === "code") {
+        dialog.replace(() => (
+          <CodeMethod providerID="openai" title={method.label} index={index!} authorization={result.data!} />
+        ))
+      }
+      if (result.data?.method === "auto") {
+        dialog.replace(() => (
+          <AutoMethod providerID="openai" title={method.label} index={index!} authorization={result.data!} />
+        ))
+      }
+    }
+    if (method.type === "api") {
+      let metadata: Record<string, string> | undefined
+      if (method.prompts?.length) {
+        const value = await PromptsMethod({ dialog, prompts: method.prompts })
+        if (!value) return
+        metadata = value
+      }
+      dialog.replace(() => <ApiMethod providerID="openai" title={method.label} metadata={metadata} />)
+    }
+  })
+
+  return null
+}
+
 export function DialogAuth() {
   const dialog = useDialog()
   const sync = useSync()
@@ -265,39 +496,15 @@ export function DialogAuth() {
       agentModel: local.agent.current()?.model,
     }),
   )
-  const providerIDs = frameworkMode()
-    ? sync.data.provider_next.all
-        .filter((provider) =>
-          isSupportedAgencyAuthProvider(provider.id, provider, sync.data.provider_auth[provider.id] ?? []),
-        )
-        .map((provider) => provider.id)
-    : undefined
-  const providerOptions = createDialogProviderOptionsWithFilter({ providerIDs })
-  const options = createMemo<DialogSelectOption<string>[]>(() => {
-    const removable = listRemovableAuthProviders({
-      all: sync.data.provider_next.all,
-      providers: sync.data.provider,
-      providerAuth: sync.data.provider_auth,
-      consoleManagedProviders: sync.data.console_state.consoleManagedProviders,
-    })
-    if (removable.length === 0) return providerOptions()
-
-    return [
-      {
-        title: "Remove credential",
-        value: "__remove__",
-        description: "Delete a stored provider credential",
-        category: "Manage",
-        onSelect: () => {
-          dialog.replace(() => <DialogRemoveCredential />)
-        },
-      },
-      ...providerOptions(),
-    ]
-  })
+  const providerOptions = createDialogProviderOptionsWithFilter({})
 
   return (
-    <DialogSelect title={frameworkMode() ? "Manage Agent Swarm auth" : "Manage provider auth"} options={options()} />
+    <Show
+      when={frameworkMode()}
+      fallback={<DialogSelect title="Manage provider auth" options={providerOptions()} />}
+    >
+      <DialogAuthOpenAI />
+    </Show>
   )
 }
 
@@ -794,11 +1001,12 @@ function AutoMethod(props: AutoMethodProps) {
     try {
       await sdk.client.instance.dispose()
       await sync.bootstrap()
-      if (frameworkMode()) {
-        dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
-        return
-      }
-      dialog.replace(() => <DialogModel providerID={props.providerID} />)
+      dialog.replace(() => (
+        <DialogAddons
+          providerID={props.providerID}
+          onDone={() => dialog.clear()}
+        />
+      ))
     } catch (error) {
       const message = toErrorMessage(error)
       log.error("provider oauth post-callback bootstrap failed", {
@@ -879,10 +1087,15 @@ function CodeMethod(props: CodeMethodProps) {
             await sdk.client.instance.dispose()
             await sync.bootstrap()
             if (frameworkMode()) {
-              dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
-              return
+              dialog.replace(() => (
+                <DialogAddons
+                  providerID={props.providerID}
+                  onDone={() => dialog.clear()}
+                />
+              ))
+            } else {
+              dialog.clear()
             }
-            dialog.replace(() => <DialogModel providerID={props.providerID} />)
           } catch (error) {
             const message = toErrorMessage(error)
             log.error("provider oauth code-flow bootstrap failed", {
@@ -1011,10 +1224,15 @@ function ApiMethod(props: ApiMethodProps) {
           await sdk.client.instance.dispose()
           await sync.bootstrap()
           if (frameworkMode()) {
-            dialog.replace(() => <DialogPostAuthModelChoice providerID={props.providerID} />)
-            return
+            dialog.replace(() => (
+              <DialogAddons
+                providerID={props.providerID}
+                onDone={() => dialog.clear()}
+              />
+            ))
+          } else {
+            dialog.clear()
           }
-          dialog.replace(() => <DialogModel providerID={props.providerID} />)
         } catch (error) {
           const message = toErrorMessage(error)
           log.error("provider api auth bootstrap failed", {

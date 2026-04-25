@@ -19,7 +19,7 @@ import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { Flag } from "@/flag/flag"
 import semver from "semver"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
-import { DialogAgencySwarmConnect, DialogAuth } from "@tui/component/dialog-provider"
+import { DialogAgencySwarmConnect, DialogAuth, DialogProvider as DialogProviderConnect } from "@tui/component/dialog-provider"
 import { ErrorComponent } from "@tui/component/error-component"
 import { PluginRouteMissing } from "@tui/component/plugin-route-missing"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
@@ -775,7 +775,8 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         name: "connect",
       },
       onSelect: () => {
-        dialog.replace(() => <DialogAgencySwarmConnect />)
+        const agency = local.model.current()?.providerID === AgencySwarmAdapter.PROVIDER_ID
+        dialog.replace(() => (agency ? <DialogAgencySwarmConnect /> : <DialogProviderConnect />))
       },
       category: "Provider",
     },
@@ -825,6 +826,18 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       onSelect: () => {
         open(AgencyProduct.docs).catch(() => {})
         dialog.clear()
+      },
+      category: "System",
+    },
+    {
+      title: "Re-run the setup wizard",
+      value: "app.onboard",
+      onSelect: () => {
+        const flagPath = process.env["OPENSWARM_ONBOARD_FLAG"]
+        if (flagPath) {
+          import("fs").then((fs) => fs.writeFileSync(flagPath, "1"))
+        }
+        exit()
       },
       category: "System",
     },
