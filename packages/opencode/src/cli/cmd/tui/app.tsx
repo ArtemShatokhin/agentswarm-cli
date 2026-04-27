@@ -19,7 +19,12 @@ import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { Flag } from "@/flag/flag"
 import semver from "semver"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
-import { DialogAgencySwarmConnect, DialogAuth, DialogProvider as DialogProviderConnect } from "@tui/component/dialog-provider"
+import {
+  DialogAddons,
+  DialogAgencySwarmConnect,
+  DialogAuth,
+  DialogProvider as DialogProviderConnect,
+} from "@tui/component/dialog-provider"
 import { ErrorComponent } from "@tui/component/error-component"
 import { PluginRouteMissing } from "@tui/component/plugin-route-missing"
 import { SDKProvider, useSDK } from "@tui/context/sdk"
@@ -777,6 +782,20 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       onSelect: () => {
         const agency = local.model.current()?.providerID === AgencySwarmAdapter.PROVIDER_ID
         dialog.replace(() => (agency ? <DialogAgencySwarmConnect /> : <DialogProviderConnect />))
+      },
+      category: "Provider",
+    },
+    {
+      title: "Configure add-ons",
+      value: "app.addons",
+      enabled: frameworkMode(),
+      hidden: !frameworkMode(),
+      slash: {
+        name: "addons",
+        aliases: ["add-ons"],
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAddons providerID="openai" onDone={() => dialog.clear()} />)
       },
       category: "Provider",
     },

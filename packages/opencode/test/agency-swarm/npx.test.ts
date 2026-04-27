@@ -158,7 +158,9 @@ describe("agency-swarm npx onboarding", () => {
       platform: "linux",
     })
     expect(posixScript).toContain('if [ -d "/home/runner/openswarm" ]; then')
-    expect(posixScript).toContain('echo "openswarm: remembered project directory no longer exists: /home/runner/openswarm" >&2')
+    expect(posixScript).toContain(
+      'echo "openswarm: remembered project directory no longer exists: /home/runner/openswarm" >&2',
+    )
     expect(posixScript).toContain('exec "/home/runner/.bun/bin/agentswarm" "$@"')
     expect(posixScript).not.toStartWith('#!/bin/sh\ncd "/home/runner/openswarm"')
   })
@@ -759,6 +761,172 @@ describe("agency-swarm npx onboarding", () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("Installer output: ERROR: No matching distribution found"),
     )
+
+    await launch?.cleanup?.()
+  })
+
+  test("prepareProjectLaunch refreshes existing pip-less uv venvs with uv", async () => {
+    await using dir = await tmpdir()
+    await writeAgency(dir.path)
+    await mkdir(path.join(dir.path, ".venv", process.platform === "win32" ? "Scripts" : "bin"), {
+      recursive: true,
+    })
+    const venvPython = path.join(
+      dir.path,
+      ".venv",
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    )
+    await Bun.write(venvPython, "")
+
+    const commands: string[][] = []
+    const uvEnvs: NodeJS.ProcessEnv[] = []
+    spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as never)
+    spyOn(prompts.log, "info").mockImplementation(() => undefined as never)
+
+    spyOn(Bun, "spawn").mockImplementation((options: any) => {
+      const cmd = options?.cmd as string[] | undefined
+      if (!cmd) throw new Error("Missing command")
+      commands.push(cmd)
+      if (cmd[0] === "uv") uvEnvs.push(options.env)
+      if (cmd[0] === "uv" && cmd[1] === "--version") {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "uv 0.9.5\n",
+          stderr: "",
+        } as never
+      }
+      if (cmd[0] === "uv" && cmd[1] === "pip") {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "",
+          stderr: "",
+        } as never
+      }
+      if (cmd.includes("import sys; print(sys.executable); print(sys.version.split()[0])")) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: `${venvPython}\n3.12.7\n`,
+          stderr: "",
+        } as never
+      }
+      if (isCanaryCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "",
+          stderr: "",
+        } as never
+      }
+      if (cmd[1]?.endsWith("launch_agency.py")) {
+        let resolveExit!: (code: number) => void
+        const exited = new Promise<number>((resolve) => {
+          resolveExit = resolve
+        })
+        return {
+          exited,
+          stderr: "",
+          kill() {
+            resolveExit(0)
+          },
+        } as never
+      }
+      throw new Error(`Unexpected command: ${cmd.join(" ")}`)
+    })
+
+    const launch = await prepareProjectLaunch({
+      directory: dir.path,
+      agencyFile: path.join(dir.path, "agency.py"),
+    })
+
+    expect(commands).toContainEqual([
+      "uv",
+      "pip",
+      "install",
+      "--python",
+      venvPython,
+      "--upgrade",
+      "agency-swarm[fastapi,litellm]",
+    ])
+    expect(commands.some(isPipInstallCommand)).toBe(false)
+    expect(uvEnvs.every((env) => env.UV_LINK_MODE === "copy")).toBe(true)
+
+    await launch?.cleanup?.()
+  })
+
+  test("prepareProjectLaunch skips optional refresh when uv and pip are unavailable", async () => {
+    await using dir = await tmpdir()
+    await writeAgency(dir.path)
+    await mkdir(path.join(dir.path, ".venv", process.platform === "win32" ? "Scripts" : "bin"), {
+      recursive: true,
+    })
+    const venvPython = path.join(
+      dir.path,
+      ".venv",
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    )
+    await Bun.write(venvPython, "")
+
+    const commands: string[][] = []
+    const warn = spyOn(prompts.log, "warn").mockImplementation(() => undefined as never)
+    spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as never)
+    spyOn(prompts.log, "info").mockImplementation(() => undefined as never)
+
+    spyOn(Bun, "spawn").mockImplementation((options: any) => {
+      const cmd = options?.cmd as string[] | undefined
+      if (!cmd) throw new Error("Missing command")
+      commands.push(cmd)
+      if (cmd[0] === "uv" && cmd[1] === "--version") {
+        return {
+          exited: Promise.resolve(1),
+          stdout: "",
+          stderr: "",
+        } as never
+      }
+      if (cmd[1] === "-m" && cmd[2] === "pip" && cmd[3] === "--version") {
+        return {
+          exited: Promise.resolve(1),
+          stdout: "",
+          stderr: `${venvPython}: No module named pip`,
+        } as never
+      }
+      if (cmd.includes("import sys; print(sys.executable); print(sys.version.split()[0])")) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: `${venvPython}\n3.12.7\n`,
+          stderr: "",
+        } as never
+      }
+      if (isCanaryCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "",
+          stderr: "",
+        } as never
+      }
+      if (cmd[1]?.endsWith("launch_agency.py")) {
+        let resolveExit!: (code: number) => void
+        const exited = new Promise<number>((resolve) => {
+          resolveExit = resolve
+        })
+        return {
+          exited,
+          stderr: "",
+          kill() {
+            resolveExit(0)
+          },
+        } as never
+      }
+      throw new Error(`Unexpected command: ${cmd.join(" ")}`)
+    })
+
+    const launch = await prepareProjectLaunch({
+      directory: dir.path,
+      agencyFile: path.join(dir.path, "agency.py"),
+    })
+
+    expect(commands.some(isPipInstallCommand)).toBe(false)
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("No module named pip"))
 
     await launch?.cleanup?.()
   })

@@ -17,8 +17,6 @@ export const STARTER_TEMPLATE_REPO = "VRSEN/openswarm"
 export const STARTER_TEMPLATE_URL = `https://github.com/${STARTER_TEMPLATE_REPO}.git`
 export const LOCAL_AGENCY_ID = "local-agency"
 
-
-
 export interface PreparedNpxLaunch {
   directory: string
   configContent?: string
@@ -357,8 +355,7 @@ export async function prepareNpxLaunch(directory: string): Promise<PreparedNpxLa
   prompts.intro("Agent Swarm")
 
   const project =
-    (await detectAgencyProject(directory)) ??
-    (await detectAgencyProject(path.join(directory, "openswarm")))
+    (await detectAgencyProject(directory)) ?? (await detectAgencyProject(path.join(directory, "openswarm")))
 
   const targetProject = project ?? (await createStarterProject({ baseDirectory: directory }))
   if (!targetProject) {
@@ -486,7 +483,9 @@ async function createStarterProject(input: { baseDirectory: string }): Promise<A
 
 export async function prepareProjectLaunch(project: AgencyProject): Promise<PreparedNpxLaunch | undefined> {
   prompts.log.info("Starting the Agency Swarm project.")
-  prompts.log.info("The launcher will reuse a project `.venv`, start a local FastAPI server, and connect the terminal UI to it.")
+  prompts.log.info(
+    "The launcher will reuse a project `.venv`, start a local FastAPI server, and connect the terminal UI to it.",
+  )
 
   const python = await ensureProjectPython(project.directory)
   if (!python) return
@@ -552,7 +551,9 @@ async function registerGlobalCommand(directory: string): Promise<void> {
       await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin }))
     } else {
       const linkPath = path.join(prefix, "bin", "openswarm")
-      try { await unlink(linkPath) } catch {}
+      try {
+        await unlink(linkPath)
+      } catch {}
       await writeFile(linkPath, buildGlobalCommandScript({ directory, agentswarmBin }))
       await chmod(linkPath, 0o755)
     }
@@ -705,10 +706,13 @@ async function ensureProjectPython(directory: string) {
   try {
     const browsersPath = path.join(directory, ".playwright-browsers")
     const npmCmd = process.platform === "win32" ? "npx.cmd" : "npx"
-    const installNodePw = await runCommand([npmCmd, "-y", "playwright", "install", "chromium", "chromium-headless-shell"], {
-      cwd: directory,
-      env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath },
-    })
+    const installNodePw = await runCommand(
+      [npmCmd, "-y", "playwright", "install", "chromium", "chromium-headless-shell"],
+      {
+        cwd: directory,
+        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath },
+      },
+    )
     if (installNodePw.code !== 0) {
       prompts.log.warn(`Playwright (Node) install: ${installNodePw.stderr.trim() || installNodePw.stdout.trim()}`)
     }
@@ -722,10 +726,16 @@ async function ensureProjectPython(directory: string) {
 }
 
 async function findUv(python: string[]): Promise<string | null> {
-  const check = await runCommand(["uv", "--version"])
-  if (check.code === 0) return "uv"
+  const uv = await findExistingUv()
+  if (uv) return uv
   const install = await runCommand([...python, "-m", "pip", "install", "uv"])
   if (install.code === 0) return "uv"
+  return null
+}
+
+async function findExistingUv(): Promise<string | null> {
+  const check = await runCommand(["uv", "--version"])
+  if (check.code === 0) return "uv"
   return null
 }
 
@@ -859,12 +869,28 @@ async function ensureLatestAgencySwarm(
   },
 ) {
   try {
-    const result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]"], {
-      cwd: directory,
-      logFile: options?.logFile,
-      streamOutputToStderr: true,
-      timeoutMs: options?.timeoutMs,
-    })
+    const uv = await findExistingUv()
+    let result: CommandResult
+    if (uv) {
+      result = await runCommand(
+        [uv, "pip", "install", "--python", python[0], "--upgrade", "agency-swarm[fastapi,litellm]"],
+        {
+          cwd: directory,
+          logFile: options?.logFile,
+          streamOutputToStderr: true,
+          timeoutMs: options?.timeoutMs,
+        },
+      )
+    } else {
+      const pip = await runCommand([...python, "-m", "pip", "--version"], { cwd: directory })
+      if (pip.code !== 0) return
+      result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]"], {
+        cwd: directory,
+        logFile: options?.logFile,
+        streamOutputToStderr: true,
+        timeoutMs: options?.timeoutMs,
+      })
+    }
     if (result.timedOut) {
       prompts.log.warn(
         result.logFile
@@ -1139,6 +1165,15 @@ function resolveCmd(cmd: string[]): string[] {
   return cmd
 }
 
+function commandEnv(cmd: string[], env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const commandName = path.basename(cmd[0]).toLowerCase()
+  if (commandName !== "uv" && commandName !== "uv.exe") return env
+  return {
+    ...env,
+    UV_LINK_MODE: env.UV_LINK_MODE ?? "copy",
+  }
+}
+
 async function runCommand(cmd: string[], options?: RunCommandOptions): Promise<CommandResult> {
   const commandLog = openCommandLog(options?.logFile)
   const writeChunk = (chunk: string) => {
@@ -1155,7 +1190,7 @@ async function runCommand(cmd: string[], options?: RunCommandOptions): Promise<C
       cwd: options?.cwd,
       stdout: "pipe",
       stderr: "pipe",
-      env: options?.env ?? process.env,
+      env: commandEnv(cmd, options?.env ?? process.env),
     })
     const outputAbort = new AbortController()
     let timeout: ReturnType<typeof setTimeout> | undefined
