@@ -1,6 +1,6 @@
 import { displayAgentName } from "@/agent/display"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
-import { Locale } from "@/util/locale"
+import * as Locale from "@/util/locale"
 
 export type AgencyProviderOptions = {
   baseURL: string
@@ -8,13 +8,15 @@ export type AgencyProviderOptions = {
   configToken?: string
   agency?: string
   recipientAgent?: string
+  recipientAgentSelectedAt?: number
   discoveryTimeoutMs: number
   rawOptions: Record<string, unknown>
 }
 
 export type AgencyTargetSelection = {
   agency: string
-  recipientAgent: string
+  agencyLabel?: string
+  recipientAgent?: string
   label: string
 }
 
@@ -29,6 +31,9 @@ export function readAgencyProviderOptions(input: {
   const token = readString(input.connectedProvider?.key) ?? configToken
   const agency = readString(options?.["agency"])
   const recipientAgent = readString(options?.["recipientAgent"]) ?? readString(options?.["recipient_agent"])
+  const recipientAgentSelectedAt =
+    readPositiveNumber(options?.["recipientAgentSelectedAt"]) ??
+    readPositiveNumber(options?.["recipient_agent_selected_at"])
   const discoveryTimeoutMs =
     readPositiveNumber(options?.["discoveryTimeoutMs"]) ??
     readPositiveNumber(options?.["discovery_timeout_ms"]) ??
@@ -40,6 +45,7 @@ export function readAgencyProviderOptions(input: {
     configToken,
     agency,
     recipientAgent,
+    recipientAgentSelectedAt,
     discoveryTimeoutMs,
     rawOptions: (options && typeof options === "object" ? options : {}) as Record<string, unknown>,
   }
@@ -53,12 +59,27 @@ export function resolveAgencyTargetSelection(input: {
   const agency = resolveSelectableAgency(input.agencies, input.configuredAgency)
   if (!agency) return undefined
 
-  const current = input.configuredRecipient ? agency.agents.find((agent) => agent.id === input.configuredRecipient) : undefined
-  const recipient = current ?? defaultAgencyRecipient(agency)
-  if (!recipient) return undefined
+  if (!input.configuredRecipient) {
+    return {
+      agency: agency.id,
+      agencyLabel: agency.name,
+      label: agency.name,
+    }
+  }
+
+  const recipient = agency.agents.find((agent) => agent.id === input.configuredRecipient)
+  if (!recipient) {
+    return {
+      agency: agency.id,
+      agencyLabel: agency.name,
+      recipientAgent: input.configuredRecipient,
+      label: input.configuredRecipient,
+    }
+  }
 
   return {
     agency: agency.id,
+    agencyLabel: agency.name,
     recipientAgent: recipient.id,
     label: recipient.name,
   }
@@ -85,8 +106,36 @@ export function cycleAgencyTargetSelection(input: {
 
   return {
     agency: agency.id,
+    agencyLabel: agency.name,
     recipientAgent: next.id,
     label: next.name,
+  }
+}
+
+export function resolveAgencyTargetFromPicker(input: {
+  agencies: AgencySwarmAdapter.AgencyDescriptor[]
+  selectedAgency: string
+  selectedRecipient?: string
+}): AgencyTargetSelection | undefined {
+  const agency = input.agencies.find((item) => item.id === input.selectedAgency)
+  if (!agency) return undefined
+
+  if (!input.selectedRecipient) {
+    return {
+      agency: agency.id,
+      agencyLabel: agency.name,
+      label: agency.name,
+    }
+  }
+
+  const recipient = agency.agents.find((agent) => agent.id === input.selectedRecipient)
+  if (!recipient) return undefined
+
+  return {
+    agency: agency.id,
+    agencyLabel: agency.name,
+    recipientAgent: recipient.id,
+    label: recipient.name,
   }
 }
 
@@ -101,6 +150,9 @@ export function buildAgencyTargetOptions(input: {
     discoveryTimeoutMs: input.providerOptions.discoveryTimeoutMs,
     agency: input.agency,
     recipientAgent: input.recipientAgent ?? null,
+    recipientAgentSelectedAt: Date.now(),
+    recipient_agent: null,
+    recipient_agent_selected_at: null,
   }
 
   if (input.providerOptions.configToken) {
@@ -108,6 +160,19 @@ export function buildAgencyTargetOptions(input: {
   }
 
   return nextOptions
+}
+
+export function shouldAdoptAgencyHandoffRecipient(input: {
+  frameworkMode: boolean
+  agency?: string
+  currentRecipient?: string
+  assistantAgent?: string
+}) {
+  if (!input.frameworkMode) return false
+  if (!input.agency) return false
+  if (!input.assistantAgent) return false
+  if (input.assistantAgent === "build") return false
+  return input.assistantAgent !== input.currentRecipient
 }
 
 export function displayRunOnlyAgentLabel(input: {
@@ -119,18 +184,12 @@ export function displayRunOnlyAgentLabel(input: {
   return input.recipientLabel ?? "Run"
 }
 
-export function displayRunOnlyModeLabel(input: {
-  frameworkMode: boolean
-  mode: string
-}) {
+export function displayRunOnlyModeLabel(input: { frameworkMode: boolean; mode: string }) {
   if (input.frameworkMode) return "Run"
   return Locale.titlecase(input.mode)
 }
 
-function resolveSelectableAgency(
-  agencies: AgencySwarmAdapter.AgencyDescriptor[],
-  configuredAgency?: string,
-) {
+function resolveSelectableAgency(agencies: AgencySwarmAdapter.AgencyDescriptor[], configuredAgency?: string) {
   if (configuredAgency) return agencies.find((agency) => agency.id === configuredAgency)
   if (agencies.length === 1) return agencies[0]
   return undefined

@@ -9,7 +9,12 @@ import { useToast } from "@tui/ui/toast"
 import { createMemo, createResource } from "solid-js"
 import { DialogAgencySwarmConnect } from "./dialog-provider"
 import { isAgencySwarmFrameworkMode } from "../session-error"
-import { buildAgencyTargetOptions, readAgencyProviderOptions, resolveAgencyTargetSelection } from "../util/agency-target"
+import {
+  buildAgencyTargetOptions,
+  readAgencyProviderOptions,
+  resolveAgencyTargetFromPicker,
+  resolveAgencyTargetSelection,
+} from "../util/agency-target"
 
 type AgentOptionValue =
   | {
@@ -139,25 +144,28 @@ export function DialogAgent() {
 
     const agencies = discovered?.agencies ?? []
     for (const agency of agencies) {
-      const category = `Agency: ${agency.id}`
+      const category = `Swarm: ${agency.name}`
+      const entry = agency.agents.find((agent) => agent.isEntryPoint) ?? agency.agents[0]
+      const description =
+        agency.description && agency.description !== entry?.description ? agency.description : undefined
       result.push({
         value: {
           kind: "agency",
           agency: agency.id,
         },
-        title: agency.id,
-        description: agency.description || `Use ${agency.name}`,
+        title: agency.name,
+        description,
         category,
       })
-      for (const recipient of agency.agents) {
+      for (const agent of agency.agents) {
         result.push({
           value: {
             kind: "recipient",
             agency: agency.id,
-            recipientAgent: recipient.id,
+            recipientAgent: agent.id,
           },
-          title: `- ${recipient.name}`,
-          description: recipient.description || (recipient.isEntryPoint ? "Entry point" : undefined),
+          title: `- ${agent.name}`,
+          description: agent.description || (agent.isEntryPoint ? "Entry point" : undefined),
           category,
         })
       }
@@ -183,7 +191,7 @@ export function DialogAgent() {
     if (!agencySwarmEnabled()) {
       return {
         kind: "local",
-        agent: local.agent.current().name,
+        agent: local.agent.current()?.name ?? "build",
       }
     }
 
@@ -193,6 +201,12 @@ export function DialogAgent() {
       configuredRecipient: providerOptions().recipientAgent,
     })
     if (selected) {
+      if (!selected.recipientAgent) {
+        return {
+          kind: "agency",
+          agency: selected.agency,
+        }
+      }
       return {
         kind: "recipient",
         agency: selected.agency,
@@ -212,7 +226,7 @@ export function DialogAgent() {
 
   return (
     <DialogSelect
-      title={agencySwarmEnabled() ? "Select agency-swarm target" : "Select agent"}
+      title={agencySwarmEnabled() ? "Select swarm" : "Select agent"}
       current={current()}
       options={options()}
       onSelect={(option) => {
@@ -240,10 +254,15 @@ export function DialogAgent() {
 
   async function setAgencySwarmTarget(value: Extract<AgentOptionValue, { kind: "agency" | "recipient" }>) {
     const options = providerOptions()
+    const selected = resolveAgencyTargetFromPicker({
+      agencies: discovery()?.agencies ?? [],
+      selectedAgency: value.agency,
+      selectedRecipient: value.kind === "recipient" ? value.recipientAgent : undefined,
+    })
     const nextOptions = buildAgencyTargetOptions({
       providerOptions: options,
       agency: value.agency,
-      recipientAgent: value.kind === "recipient" ? value.recipientAgent : null,
+      recipientAgent: selected?.recipientAgent ?? null,
     })
 
     await sdk.client.global.config.update(
@@ -267,13 +286,13 @@ export function DialogAgent() {
     await sync.bootstrap()
     dialog.clear()
 
-    const selected =
-      value.kind === "recipient"
-        ? `Selected ${value.recipientAgent} in agency ${value.agency}`
-        : `Selected agency ${value.agency}`
+    const selectedMessage =
+      value.kind === "agency"
+        ? `Selected swarm ${selected?.agencyLabel ?? value.agency}`
+        : `Selected ${selected?.label ?? value.recipientAgent} in swarm ${selected?.agencyLabel ?? value.agency}`
     toast.show({
       variant: "success",
-      message: selected,
+      message: selectedMessage,
       duration: 3000,
     })
   }

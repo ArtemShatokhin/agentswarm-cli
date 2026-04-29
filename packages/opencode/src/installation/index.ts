@@ -1,176 +1,171 @@
-import { Effect, Layer, Schema, ServiceMap, Stream } from "effect"
+import { Effect, Layer, Schema, Context, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
-import { makeRuntime } from "@/effect/run-service"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import path from "path"
 import z from "zod"
 import { BusEvent } from "@/bus/bus-event"
-import { Flag } from "../flag/flag"
-import { Log } from "../util/log"
-import { CHANNEL as channel, VERSION as version } from "./meta"
-import { AgencyBrand } from "@/agency-swarm/brand"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { Log } from "../util"
 
 import semver from "semver"
+import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
+import { InstallationDistribution } from "./distribution"
 
-export namespace Installation {
-  const log = Log.create({ service: "installation" })
-  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
+const log = Log.create({ service: "installation" })
+const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
 
-  export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
+export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
 
-  export type ReleaseType = "patch" | "minor" | "major"
+export type ReleaseType = "patch" | "minor" | "major"
 
-  export const Event = {
-    Updated: BusEvent.define(
-      "installation.updated",
-      z.object({
-        version: z.string(),
-      }),
-    ),
-    UpdateAvailable: BusEvent.define(
-      "installation.update-available",
-      z.object({
-        version: z.string(),
-      }),
-    ),
-  }
+export const Event = {
+  Updated: BusEvent.define(
+    "installation.updated",
+    Schema.Struct({
+      version: Schema.String,
+    }),
+  ),
+  UpdateAvailable: BusEvent.define(
+    "installation.update-available",
+    Schema.Struct({
+      version: Schema.String,
+    }),
+  ),
+}
 
-  export function getReleaseType(current: string, latest: string): ReleaseType {
-    const currMajor = semver.major(current)
-    const currMinor = semver.minor(current)
-    const newMajor = semver.major(latest)
-    const newMinor = semver.minor(latest)
+export function getReleaseType(current: string, latest: string): ReleaseType {
+  const currMajor = semver.major(current)
+  const currMinor = semver.minor(current)
+  const newMajor = semver.major(latest)
+  const newMinor = semver.minor(latest)
 
-    if (newMajor > currMajor) return "major"
-    if (newMinor > currMinor) return "minor"
-    return "patch"
-  }
+  if (newMajor > currMajor) return "major"
+  if (newMinor > currMinor) return "minor"
+  return "patch"
+}
 
-  export const Info = z
-    .object({
-      version: z.string(),
-      latest: z.string(),
-    })
-    .meta({
-      ref: "InstallationInfo",
-    })
-  export type Info = z.infer<typeof Info>
-
-  export const VERSION = version
-  export const CHANNEL = channel
-  export const USER_AGENT = `agentswarm-cli/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
-
-  export function isPreview() {
-    return CHANNEL !== "latest"
-  }
-
-  export function isLocal() {
-    return CHANNEL === "local"
-  }
-
-  export class UpgradeFailedError extends Schema.TaggedErrorClass<UpgradeFailedError>()("UpgradeFailedError", {
-    stderr: Schema.String,
-  }) {}
-
-  // Response schemas for external version APIs
-  const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
-  const NpmPackage = Schema.Struct({ version: Schema.String })
-  const BrewFormula = Schema.Struct({ versions: Schema.Struct({ stable: Schema.String }) })
-  const ChocoPackage = Schema.Struct({
-    d: Schema.Struct({ results: Schema.Array(Schema.Struct({ Version: Schema.String })) }),
+export const Info = z
+  .object({
+    version: z.string(),
+    latest: z.string(),
   })
-  const ScoopManifest = NpmPackage
+  .meta({
+    ref: "InstallationInfo",
+  })
+export type Info = z.infer<typeof Info>
 
-  export interface Interface {
-    readonly info: () => Effect.Effect<Info>
-    readonly method: () => Effect.Effect<Method>
-    readonly latest: (method?: Method) => Effect.Effect<string>
-    readonly upgrade: (method: Method, target: string) => Effect.Effect<void, UpgradeFailedError>
-  }
+export const USER_AGENT = `${InstallationDistribution.packageName}/${InstallationChannel}/${InstallationVersion}/${Flag.OPENCODE_CLIENT}`
 
-  export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/Installation") {}
+export function isPreview() {
+  return InstallationChannel !== "latest"
+}
 
-  export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildProcessSpawner.ChildProcessSpawner> =
-    Layer.effect(
-      Service,
-      Effect.gen(function* () {
-        const http = yield* HttpClient.HttpClient
-        const httpOk = HttpClient.filterStatusOk(withTransientReadRetry(http))
-        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+export function isLocal() {
+  return InstallationChannel === "local"
+}
 
-        const text = Effect.fnUntraced(
-          function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
-            const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
-              cwd: opts?.cwd,
-              env: opts?.env,
-              extendEnv: true,
-            })
-            const handle = yield* spawner.spawn(proc)
-            const out = yield* Stream.mkString(Stream.decodeText(handle.stdout))
-            yield* handle.exitCode
-            return out
-          },
-          Effect.scoped,
-          Effect.catch(() => Effect.succeed("")),
-        )
+export class UpgradeFailedError extends Schema.TaggedErrorClass<UpgradeFailedError>()("UpgradeFailedError", {
+  stderr: Schema.String,
+}) {}
 
-        const run = Effect.fnUntraced(
-          function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
-            const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
-              cwd: opts?.cwd,
-              env: opts?.env,
-              extendEnv: true,
-            })
-            const handle = yield* spawner.spawn(proc)
-            const [stdout, stderr] = yield* Effect.all(
-              [Stream.mkString(Stream.decodeText(handle.stdout)), Stream.mkString(Stream.decodeText(handle.stderr))],
-              { concurrency: 2 },
-            )
-            const code = yield* handle.exitCode
-            return { code, stdout, stderr }
-          },
-          Effect.scoped,
-          Effect.catch(() => Effect.succeed({ code: ChildProcessSpawner.ExitCode(1), stdout: "", stderr: "" })),
-        )
+const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
 
-        const repo = "VRSEN/agentswarm-cli"
-        const install = `https://raw.githubusercontent.com/${repo}/dev/install`
+export interface Interface {
+  readonly info: () => Effect.Effect<Info>
+  readonly method: () => Effect.Effect<Method>
+  readonly latest: (method?: Method) => Effect.Effect<string>
+  readonly upgrade: (method: Method, target: string) => Effect.Effect<void, UpgradeFailedError>
+}
 
-        const upgradeCurl = Effect.fnUntraced(
-          function* (target: string) {
-            const response = yield* httpOk.execute(HttpClientRequest.get(install))
-            const body = yield* response.text
-            const bodyBytes = new TextEncoder().encode(body)
-            const proc = ChildProcess.make("bash", [], {
-              stdin: Stream.make(bodyBytes),
-              env: { VERSION: target },
-              extendEnv: true,
-            })
-            const handle = yield* spawner.spawn(proc)
-            const [stdout, stderr] = yield* Effect.all(
-              [Stream.mkString(Stream.decodeText(handle.stdout)), Stream.mkString(Stream.decodeText(handle.stderr))],
-              { concurrency: 2 },
-            )
-            const code = yield* handle.exitCode
-            return { code, stdout, stderr }
-          },
-          Effect.scoped,
-          Effect.orDie,
-        )
+export class Service extends Context.Service<Service, Interface>()("@opencode/Installation") {}
 
-        const methodImpl = Effect.fn("Installation.method")(function* () {
-          if (process.execPath.includes(path.join(AgencyBrand.workspace, "bin"))) return "curl" as Method
+export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildProcessSpawner.ChildProcessSpawner> =
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const http = yield* HttpClient.HttpClient
+      const httpOk = HttpClient.filterStatusOk(withTransientReadRetry(http))
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+
+      const text = Effect.fnUntraced(
+        function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
+          const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
+            cwd: opts?.cwd,
+            env: opts?.env,
+            extendEnv: true,
+          })
+          const handle = yield* spawner.spawn(proc)
+          const out = yield* Stream.mkString(Stream.decodeText(handle.stdout))
+          yield* handle.exitCode
+          return out
+        },
+        Effect.scoped,
+        Effect.catch(() => Effect.succeed("")),
+      )
+
+      const run = Effect.fnUntraced(
+        function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
+          const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
+            cwd: opts?.cwd,
+            env: opts?.env,
+            extendEnv: true,
+          })
+          const handle = yield* spawner.spawn(proc)
+          const [stdout, stderr] = yield* Effect.all(
+            [Stream.mkString(Stream.decodeText(handle.stdout)), Stream.mkString(Stream.decodeText(handle.stderr))],
+            { concurrency: 2 },
+          )
+          const code = yield* handle.exitCode
+          return { code, stdout, stderr }
+        },
+        Effect.scoped,
+        Effect.catch(() => Effect.succeed({ code: ChildProcessSpawner.ExitCode(1), stdout: "", stderr: "" })),
+      )
+
+      const upgradeCurl = Effect.fnUntraced(
+        function* (target: string) {
+          const response = yield* httpOk.execute(HttpClientRequest.get(InstallationDistribution.installURL))
+          const body = yield* response.text
+          const bodyBytes = new TextEncoder().encode(body)
+          const proc = ChildProcess.make("bash", [], {
+            stdin: Stream.make(bodyBytes),
+            env: { VERSION: target },
+            extendEnv: true,
+          })
+          const handle = yield* spawner.spawn(proc)
+          const [stdout, stderr] = yield* Effect.all(
+            [Stream.mkString(Stream.decodeText(handle.stdout)), Stream.mkString(Stream.decodeText(handle.stderr))],
+            { concurrency: 2 },
+          )
+          const code = yield* handle.exitCode
+          return { code, stdout, stderr }
+        },
+        Effect.scoped,
+        Effect.orDie,
+      )
+
+      const result: Interface = {
+        info: Effect.fn("Installation.info")(function* () {
+          return {
+            version: InstallationVersion,
+            latest: yield* result.latest(),
+          }
+        }),
+        method: Effect.fn("Installation.method")(function* () {
+          if (process.execPath.includes(path.join(InstallationDistribution.installDir, "bin"))) return "curl" as Method
           if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
           const exec = process.execPath.toLowerCase()
-          const pkg = "agentswarm-cli"
 
           const checks: Array<{ name: Method; command: () => Effect.Effect<string> }> = [
             { name: "npm", command: () => text([npmCmd, "list", "-g", "--depth=0"]) },
             { name: "yarn", command: () => text(["yarn", "global", "list"]) },
             { name: "pnpm", command: () => text(["pnpm", "list", "-g", "--depth=0"]) },
             { name: "bun", command: () => text(["bun", "pm", "ls", "-g"]) },
+            { name: "brew", command: () => text(["brew", "list", "--formula", "opencode"]) },
+            { name: "scoop", command: () => text(["scoop", "list", "opencode"]) },
+            { name: "choco", command: () => text(["choco", "list", "--limit-output", "opencode"]) },
           ]
 
           checks.sort((a, b) => {
@@ -183,141 +178,95 @@ export namespace Installation {
 
           for (const check of checks) {
             const output = yield* check.command()
-            const installedName = pkg
-            if (output.includes(installedName)) {
+            if (output.includes(InstallationDistribution.packageName)) {
               return check.name
             }
           }
 
           return "unknown" as Method
-        })
+        }),
+        latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
+          const detectedMethod = installMethod || (yield* result.method())
 
-        const latestImpl = Effect.fn("Installation.latest")(function* (installMethod?: Method) {
-          const detectedMethod = installMethod || (yield* methodImpl())
-
-          if (detectedMethod === "brew") {
+          if (
+            detectedMethod === "brew" ||
+            detectedMethod === "choco" ||
+            detectedMethod === "scoop" ||
+            detectedMethod === "yarn"
+          ) {
             return yield* new UpgradeFailedError({
-              stderr: "agentswarm-cli is not published to Homebrew. Use npm, yarn, pnpm, bun, or curl instead.",
-            })
-          }
-
-          if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm" || detectedMethod === "yarn") {
-            const r = (yield* text([npmCmd, "config", "get", "registry"])).trim()
-            const reg = r || "https://registry.npmjs.org"
-            const registry = reg.endsWith("/") ? reg.slice(0, -1) : reg
-            const channel = CHANNEL
-            const response = yield* httpOk.execute(
-              HttpClientRequest.get(`${registry}/agentswarm-cli/${channel}`).pipe(HttpClientRequest.acceptJson),
-            )
-            const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
-            return data.version
-          }
-
-          if (detectedMethod === "choco") {
-            const response = yield* httpOk.execute(
-              HttpClientRequest.get(
-                "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27opencode%27%20and%20IsLatestVersion&$select=Version",
-              ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
-            )
-            const data = yield* HttpClientResponse.schemaBodyJson(ChocoPackage)(response)
-            return data.d.results[0].Version
-          }
-
-          if (detectedMethod === "scoop") {
-            return yield* new UpgradeFailedError({
-              stderr: "agentswarm-cli is not published to Scoop. Use npm, yarn, pnpm, bun, or curl instead.",
+              stderr: `${InstallationDistribution.packageName} is not published to ${detectedMethod}. Use npm, pnpm, bun, or curl instead.`,
             })
           }
 
           const response = yield* httpOk.execute(
-            HttpClientRequest.get(`https://api.github.com/repos/${repo}/releases/latest`).pipe(
-              HttpClientRequest.acceptJson,
-            ),
+            HttpClientRequest.get(
+              `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
+            ).pipe(HttpClientRequest.acceptJson),
           )
           const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
           return data.tag_name.replace(/^v/, "")
-        }, Effect.orDie)
-
-        const upgradeImpl = Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
-          let result: { code: ChildProcessSpawner.ExitCode; stdout: string; stderr: string } | undefined
+        }, Effect.orDie),
+        upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
+          let upgradeResult: { code: ChildProcessSpawner.ExitCode; stdout: string; stderr: string } | undefined
           switch (m) {
             case "curl":
-              result = yield* upgradeCurl(target)
+              upgradeResult = yield* upgradeCurl(target)
               break
             case "npm":
-              result = yield* run([npmCmd, "install", "-g", `agentswarm-cli@${target}`])
-              break
-            case "yarn":
-              result = yield* run(["yarn", "global", "add", `agentswarm-cli@${target}`])
+              upgradeResult = yield* run([npmCmd, "install", "-g", `${InstallationDistribution.packageName}@${target}`])
               break
             case "pnpm":
-              result = yield* run(["pnpm", "install", "-g", `agentswarm-cli@${target}`])
+              upgradeResult = yield* run(["pnpm", "install", "-g", `${InstallationDistribution.packageName}@${target}`])
               break
             case "bun":
-              result = yield* run(["bun", "install", "-g", `agentswarm-cli@${target}`])
+              upgradeResult = yield* run(["bun", "install", "-g", `${InstallationDistribution.packageName}@${target}`])
               break
-            case "brew": {
+            case "brew":
               return yield* new UpgradeFailedError({
-                stderr: "agentswarm-cli is not published to Homebrew. Use npm, yarn, pnpm, bun, or curl instead.",
+                stderr: `${InstallationDistribution.packageName} is not published to Homebrew. Use npm, pnpm, bun, or curl instead.`,
               })
               break
-            }
             case "choco":
               return yield* new UpgradeFailedError({
-                stderr: "agentswarm-cli is not published to Chocolatey. Use npm, yarn, pnpm, bun, or curl instead.",
+                stderr: `${InstallationDistribution.packageName} is not published to Chocolatey. Use npm, pnpm, bun, or curl instead.`,
               })
               break
             case "scoop":
               return yield* new UpgradeFailedError({
-                stderr: "agentswarm-cli is not published to Scoop. Use npm, yarn, pnpm, bun, or curl instead.",
+                stderr: `${InstallationDistribution.packageName} is not published to Scoop. Use npm, pnpm, bun, or curl instead.`,
+              })
+              break
+            case "yarn":
+              return yield* new UpgradeFailedError({
+                stderr: `${InstallationDistribution.packageName} is not published to Yarn. Use npm, pnpm, bun, or curl instead.`,
               })
               break
             default:
-              return yield* new UpgradeFailedError({ stderr: `Unknown method: ${m}` })
+              upgradeResult = yield* run([npmCmd, "install", "-g", `${InstallationDistribution.packageName}@${target}`])
+              break
           }
-          if (!result || result.code !== 0) {
-            const stderr = result?.stderr || ""
+          if (!upgradeResult || upgradeResult.code !== 0) {
+            const stderr = upgradeResult?.stderr || ""
             return yield* new UpgradeFailedError({ stderr })
           }
           log.info("upgraded", {
             method: m,
             target,
-            stdout: result.stdout,
-            stderr: result.stderr,
+            stdout: upgradeResult.stdout,
+            stderr: upgradeResult.stderr,
           })
           yield* text([process.execPath, "--version"])
-        })
+        }),
+      }
 
-        return Service.of({
-          info: Effect.fn("Installation.info")(function* () {
-            return {
-              version: VERSION,
-              latest: yield* latestImpl(),
-            }
-          }),
-          method: methodImpl,
-          latest: latestImpl,
-          upgrade: upgradeImpl,
-        })
-      }),
-    )
-
-  export const defaultLayer = layer.pipe(
-    Layer.provide(FetchHttpClient.layer),
-    Layer.provide(CrossSpawnSpawner.defaultLayer),
+      return Service.of(result)
+    }),
   )
 
-  const { runPromise } = makeRuntime(Service, defaultLayer)
+export const defaultLayer = layer.pipe(
+  Layer.provide(FetchHttpClient.layer),
+  Layer.provide(CrossSpawnSpawner.defaultLayer),
+)
 
-  export async function method(): Promise<Method> {
-    return runPromise((svc) => svc.method())
-  }
-
-  export async function latest(installMethod?: Method): Promise<string> {
-    return runPromise((svc) => svc.latest(installMethod))
-  }
-
-  export async function upgrade(m: Method, target: string): Promise<void> {
-    return runPromise((svc) => svc.upgrade(m, target))
-  }
-}
+export * as Installation from "."

@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test"
-import { getVisibleProviderAuthMethods, hasStoredProviderCredential } from "../../../src/cli/cmd/tui/util/provider-auth"
+import {
+  getProviderAuthMethodSuffix,
+  getStoredProviderAuthMethod,
+  getVisibleProviderAuthMethods,
+  hasStoredProviderCredential,
+  OAUTH_DUMMY_KEY,
+} from "../../../src/cli/cmd/tui/util/provider-auth"
 
 test("detects stored api credentials", () => {
   expect(
@@ -151,4 +157,101 @@ test("keeps only API auth methods for non-openai providers in agency-swarm frame
       { frameworkMode: true },
     ),
   ).toEqual([{ type: "api", label: "API key" }])
+})
+
+test("getStoredProviderAuthMethod returns 'api' for stored API key", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "openai",
+      name: "OpenAI",
+      source: "api",
+      env: [],
+      options: {},
+      models: {},
+    }),
+  ).toBe("api")
+})
+
+test("getStoredProviderAuthMethod returns 'env' for env-backed providers", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "openai",
+      name: "OpenAI",
+      source: "env",
+      env: ["OPENAI_API_KEY"],
+      options: {},
+      models: {},
+    }),
+  ).toBe("env")
+})
+
+test("getStoredProviderAuthMethod returns 'config' for config-backed providers", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "openai",
+      name: "OpenAI",
+      source: "config",
+      env: [],
+      options: { apiKey: "sk-config" },
+      models: {},
+    }),
+  ).toBe("config")
+})
+
+test("getStoredProviderAuthMethod ignores config-only provider options without an API key", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "openai",
+      name: "OpenAI",
+      source: "config",
+      env: [],
+      options: { whitelist: ["gpt-4.1"] },
+      models: {},
+    }),
+  ).toBeUndefined()
+})
+
+test("getStoredProviderAuthMethod returns 'oauth' for OAUTH_DUMMY_KEY-marked custom providers", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "openai",
+      name: "OpenAI",
+      source: "custom",
+      env: [],
+      options: { apiKey: OAUTH_DUMMY_KEY },
+      models: {},
+    }),
+  ).toBe("oauth")
+})
+
+test("getStoredProviderAuthMethod returns undefined for opencode public mode", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "opencode",
+      name: "OpenCode",
+      source: "custom",
+      env: [],
+      options: { apiKey: "public" },
+      models: {},
+    }),
+  ).toBeUndefined()
+})
+
+test("getStoredProviderAuthMethod returns undefined for empty custom options", () => {
+  expect(
+    getStoredProviderAuthMethod({
+      id: "openai",
+      name: "OpenAI",
+      source: "custom",
+      env: [],
+      options: {},
+      models: {},
+    }),
+  ).toBeUndefined()
+})
+
+test("getProviderAuthMethodSuffix marks the current stored auth method", () => {
+  expect(getProviderAuthMethodSuffix({ type: "oauth", label: "ChatGPT" }, "oauth")).toBe("<- current")
+  expect(getProviderAuthMethodSuffix({ type: "api", label: "API key" }, "env")).toBe("<- current")
+  expect(getProviderAuthMethodSuffix({ type: "api", label: "API key" }, "oauth")).toBeUndefined()
 })

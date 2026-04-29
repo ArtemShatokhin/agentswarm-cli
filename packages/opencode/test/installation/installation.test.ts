@@ -3,6 +3,7 @@ import { Effect, Layer, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { Installation } from "../../src/installation"
+import { InstallationDistribution } from "../../src/installation/distribution"
 
 const encoder = new TextEncoder()
 
@@ -27,6 +28,7 @@ function mockSpawner(handler: (cmd: string, args: readonly string[]) => string =
         all: Stream.empty,
         getInputFd: () => ({ [Symbol.for("effect/Sink/TypeId")]: Symbol.for("effect/Sink/TypeId") }) as any,
         getOutputFd: () => Stream.empty,
+        unref: Effect.succeed(Effect.void),
       }),
     )
   })
@@ -50,12 +52,17 @@ function testLayer(
 describe("installation", () => {
   describe("latest", () => {
     test("reads release version from GitHub releases", async () => {
-      const layer = testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))
+      const urls: string[] = []
+      const layer = testLayer((request) => {
+        urls.push(request.url)
+        return jsonResponse({ tag_name: "v1.2.3" })
+      })
 
       const result = await Effect.runPromise(
         Installation.Service.use((svc) => svc.latest("unknown")).pipe(Effect.provide(layer)),
       )
       expect(result).toBe("1.2.3")
+      expect(urls).toEqual([`https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`])
     })
 
     test("strips v prefix from GitHub release tag", async () => {
@@ -67,31 +74,72 @@ describe("installation", () => {
       expect(result).toBe("4.0.0-beta.1")
     })
 
-    test("reads npm registry versions", async () => {
+    test("reads GitHub releases for npm, bun, and pnpm installs", async () => {
+      const urls: string[] = []
+      const layer = testLayer((request) => {
+        urls.push(request.url)
+        return jsonResponse({ tag_name: "v1.8.0" })
+      })
+
+      await expect(
+        Effect.runPromise(Installation.Service.use((svc) => svc.latest("npm")).pipe(Effect.provide(layer))),
+      ).resolves.toBe("1.8.0")
+      await expect(
+        Effect.runPromise(Installation.Service.use((svc) => svc.latest("bun")).pipe(Effect.provide(layer))),
+      ).resolves.toBe("1.8.0")
+      await expect(
+        Effect.runPromise(Installation.Service.use((svc) => svc.latest("pnpm")).pipe(Effect.provide(layer))),
+      ).resolves.toBe("1.8.0")
+      expect(urls).toEqual([
+        `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
+        `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
+        `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
+      ])
+    })
+
+    test("does not read unsupported package-manager release feeds", async () => {
+      const urls: string[] = []
+      const layer = testLayer((request) => {
+        urls.push(request.url)
+        return jsonResponse({})
+      })
+
+      await Effect.runPromise(Installation.Service.use((svc) => svc.latest("scoop")).pipe(Effect.provide(layer))).catch(
+        () => {},
+      )
+      await Effect.runPromise(Installation.Service.use((svc) => svc.latest("choco")).pipe(Effect.provide(layer))).catch(
+        () => {},
+      )
+      await Effect.runPromise(Installation.Service.use((svc) => svc.latest("brew")).pipe(Effect.provide(layer))).catch(
+        () => {},
+      )
+      await Effect.runPromise(Installation.Service.use((svc) => svc.latest("yarn")).pipe(Effect.provide(layer))).catch(
+        () => {},
+      )
+      expect(urls).toEqual([])
+    })
+  })
+
+  describe("upgrade", () => {
+    test("installs the fork npm package", async () => {
+      const calls: string[][] = []
       const layer = testLayer(
-        () => jsonResponse({ version: "1.5.0" }),
+        () => jsonResponse({}),
         (cmd, args) => {
-          if (cmd === "npm" && args.includes("registry")) return "https://registry.npmjs.org\n"
+          calls.push([cmd, ...args])
           return ""
         },
       )
 
-      const result = await Effect.runPromise(
-        Installation.Service.use((svc) => svc.latest("npm")).pipe(Effect.provide(layer)),
+      await Effect.runPromise(
+        Installation.Service.use((svc) => svc.upgrade("npm", "1.2.3")).pipe(Effect.provide(layer)),
       )
-      expect(result).toBe("1.5.0")
-    })
-
-    test("reads npm registry versions for bun method", async () => {
-      const layer = testLayer(
-        () => jsonResponse({ version: "1.6.0" }),
-        () => "",
-      )
-
-      const result = await Effect.runPromise(
-        Installation.Service.use((svc) => svc.latest("bun")).pipe(Effect.provide(layer)),
-      )
-      expect(result).toBe("1.6.0")
+      expect(calls).toContainEqual([
+        process.platform === "win32" ? "npm.cmd" : "npm",
+        "install",
+        "-g",
+        `${InstallationDistribution.packageName}@1.2.3`,
+      ])
     })
   })
 })

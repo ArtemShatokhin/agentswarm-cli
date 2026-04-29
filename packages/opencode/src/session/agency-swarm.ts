@@ -5,7 +5,7 @@ import {
   readCredentialHeaders,
   readStringRecord,
 } from "@/agency-swarm/client-config"
-import { Flag } from "@/flag/flag"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { AgencySwarmHistory } from "@/agency-swarm/history"
 import {
   buildLitellmModelForClientConfig,
@@ -21,7 +21,8 @@ import { Provider } from "@/provider/provider"
 import { Session } from "@/session"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionID } from "@/session/schema"
-import { Log } from "@/util/log"
+import { Log } from "@/util"
+import semver from "semver"
 import {
   asRecord,
   asRawString,
@@ -32,6 +33,7 @@ import {
   extractEventMeta,
   extractFunctionCallOutputs as extractFunctionCallOutputsFromMessages,
   findRecipientAgent,
+  isAgencyToolOutputType,
   normalizeCallerAgent as normalizeCallerAgentValue,
   parseToolInput,
   stringifyToolOutput,
@@ -48,6 +50,7 @@ export namespace SessionAgencySwarm {
     baseURL: string
     agency?: string
     recipientAgent?: string
+    recipientAgentSelectedAt?: number
     additionalInstructions?: string
     userContext?: Record<string, unknown>
     fileIDs?: string[]
@@ -93,6 +96,9 @@ export namespace SessionAgencySwarm {
     const rawAgency = asString(provider?.options?.["agency"])
     const rawRecipientAgent =
       asString(provider?.options?.["recipientAgent"]) ?? asString(provider?.options?.["recipient_agent"])
+    const rawRecipientAgentSelectedAt =
+      asNumber(provider?.options?.["recipientAgentSelectedAt"]) ??
+      asNumber(provider?.options?.["recipient_agent_selected_at"])
     const rawAdditionalInstructions =
       asString(provider?.options?.["additionalInstructions"]) ??
       asString(provider?.options?.["additional_instructions"])
@@ -112,6 +118,7 @@ export namespace SessionAgencySwarm {
       baseURL: AgencySwarmAdapter.normalizeBaseURL(rawBaseURL || AgencySwarmAdapter.DEFAULT_BASE_URL),
       agency: rawAgency || undefined,
       recipientAgent: rawRecipientAgent || undefined,
+      recipientAgentSelectedAt: rawRecipientAgentSelectedAt,
       additionalInstructions: rawAdditionalInstructions || undefined,
       userContext: rawUserContext,
       fileIDs: rawFileIDs.length > 0 ? rawFileIDs : undefined,
@@ -169,32 +176,33 @@ export namespace SessionAgencySwarm {
       forwardUpstreamCredentials === true
     const skipOpenAIApiKey = hasExplicitOpenAIApiKey(config) || !!readCredentialHeaders(config)
     const rawGenerated = forwardGenerated
-      ? await buildAuthClientConfig(await Auth.all(), await listProvidersForEnvCheck(), getEnvForClientConfig(), {
+      ? await buildAuthClientConfig(await Auth.all(), await listProvidersForEnvCheck(), await getEnvForClientConfig(), {
           skipOpenAIApiKeyInjection: skipOpenAIApiKey,
           skipOpenAIOAuthFromStored: hasExplicitOpenAIClientConfig(config),
           allowStoredOpenAIOAuth: !explicitUpstreamBaseURL || isCodexAPIBaseURL(explicitUpstreamBaseURL),
         })
       : undefined
     const generated =
-      !explicitUpstreamBaseURL &&
-      (await shouldStripCodexOAuth(requestedModel, rawGenerated, explicit, async () => {
-        try {
-          return await AgencySwarmAdapter.getMetadata({
-            baseURL,
-            agency,
-            token,
-            timeoutMs,
-          })
-        } catch (error) {
-          log.error("unable to load agency metadata while deciding Codex OAuth routing", {
-            baseURL,
-            agency,
-            error: error instanceof Error ? error.message : String(error),
-          })
-          return undefined
-        }
-      }))
-        ? stripCodexOAuthForNonOpenAI(rawGenerated)
+      rawGenerated && !explicitUpstreamBaseURL
+        ? (await shouldStripCodexOAuth(requestedModel, rawGenerated, explicit, async () => {
+            try {
+              return await AgencySwarmAdapter.getMetadata({
+                baseURL,
+                agency,
+                token,
+                timeoutMs,
+              })
+            } catch (error) {
+              log.error("unable to load agency metadata while deciding Codex OAuth routing", {
+                baseURL,
+                agency,
+                error: error instanceof Error ? error.message : String(error),
+              })
+              return undefined
+            }
+          }))
+          ? stripCodexOAuthForNonOpenAI(rawGenerated)
+          : rawGenerated
         : rawGenerated
     if (!config) {
       return finalizeClientConfig(generated, undefined, sessionLitellmModel)
@@ -354,12 +362,6 @@ export namespace SessionAgencySwarm {
     return value.replace(/\/+$/, "") === CODEX_API_BASE_URL
   }
 
-  // TODO(agency-swarm#629): remove after upstream scopes config.base_url per-provider.
-  /**
-   * True when `litellm_keys` holds a credential for any non-OpenAI-based provider. Signals that the
-   * agency-swarm server will route at least one agent through LiteLLM for a provider where the
-   * Codex OAuth `base_url` would break Messages API calls.
-   */
   function hasNonOpenAILitellmKey(src: Record<string, unknown> | undefined): boolean {
     if (!src) return false
     const keys = asRecord(src["litellm_keys"]) ?? asRecord(src["litellmKeys"])
@@ -370,30 +372,52 @@ export namespace SessionAgencySwarm {
     )
   }
 
-  // TODO(agency-swarm#629): remove after upstream scopes config.base_url per-provider.
-  /**
-   * Strip the Codex OAuth triplet when either the session override is non-OpenAI
-   * (explicit user intent to route non-OpenAI), or no session override exists and the
-   * generated payload or the user's explicit `client_config.litellm_keys` carries a
-   * non-OpenAI LiteLLM key (framework mode — agent-level non-OpenAI routing is possible).
-   * A session model that is explicitly OpenAI-based keeps the OAuth triplet so the
-   * forced OpenAI override still authenticates.
-   */
+  function readStableAgencySwarmVersion(metadata: AgencySwarmAdapter.AgencyMetadata): string | undefined {
+    const version = asString(metadata["agency_swarm_version"])
+    if (!version) return undefined
+    const match = version.trim().match(/^(?:v)?(\d+\.\d+\.\d+)(?:(?:\.post\d+)|(?:post\d+)|(?:\+[0-9a-z.-]+))?$/i)
+    if (!match) {
+      log.warn(
+        "agency metadata exposed a prerelease or unreadable agency_swarm_version while deciding Codex OAuth routing",
+        {
+          version,
+        },
+      )
+      return undefined
+    }
+    return match[1]
+  }
+
+  function scopesCodexBaseURLPerProvider(metadata: AgencySwarmAdapter.AgencyMetadata): boolean {
+    const version = readStableAgencySwarmVersion(metadata)
+    if (!version) return false
+    return semver.gte(version, "1.9.3")
+  }
+
   async function shouldStripCodexOAuth(
     sessionLitellmModel: string | undefined,
     generated: Record<string, unknown> | undefined,
     explicit: Record<string, unknown> | undefined,
     loadAgencyMetadata: () => Promise<AgencySwarmAdapter.AgencyMetadata | undefined>,
   ): Promise<boolean> {
-    if (!isOpenAIBasedLitellmModel(sessionLitellmModel)) return true
-    if (sessionLitellmModel) return false
-    if (!hasNonOpenAILitellmKey(generated) && !hasNonOpenAILitellmKey(explicit)) return false
+    const sessionTargetsNonOpenAI =
+      !!sessionLitellmModel && !isOpenAIBasedLitellmModel(normalizeExplicitClientConfigModel(sessionLitellmModel))
+    if (!sessionTargetsNonOpenAI && sessionLitellmModel) return false
+    if (!sessionTargetsNonOpenAI && !hasNonOpenAILitellmKey(generated) && !hasNonOpenAILitellmKey(explicit)) {
+      return false
+    }
 
     const metadata = await loadAgencyMetadata()
     if (!metadata) {
       log.error("agency metadata unavailable while deciding Codex OAuth routing; stripping OpenAI OAuth conservatively")
       return true
     }
+
+    if (scopesCodexBaseURLPerProvider(metadata)) {
+      return false
+    }
+
+    if (sessionTargetsNonOpenAI) return true
 
     const agencyModels = extractAgencyModels(metadata)
     if (agencyModels.length === 0) {
@@ -429,13 +453,6 @@ export namespace SessionAgencySwarm {
     return true
   }
 
-  // TODO(agency-swarm#629): remove after upstream scopes config.base_url per-provider.
-  /**
-   * Drop the Codex OAuth triplet (`base_url` + `api_key` + `ChatGPT-Account-Id`) from the generated payload
-   * so a non-OpenAI LiteLLM session (anthropic, gemini, ...) does not inherit ChatGPT's OAuth endpoint.
-   * Upstream agency-swarm applies `config.base_url` to all LiteLLM agents regardless of provider
-   * (endpoint_handlers.py:1320), which would route Anthropic Messages through chatgpt.com and 404.
-   */
   function stripCodexOAuthForNonOpenAI(
     generated: Record<string, unknown> | undefined,
   ): Record<string, unknown> | undefined {
@@ -447,7 +464,7 @@ export namespace SessionAgencySwarm {
     delete out["api_key"]
     const headers = readStringRecord(out["default_headers"])
     if (headers && "ChatGPT-Account-Id" in headers) {
-      const next = Object.fromEntries(Object.entries(headers).filter(([k]) => k !== "ChatGPT-Account-Id"))
+      const next = Object.fromEntries(Object.entries(headers).filter(([key]) => key !== "ChatGPT-Account-Id"))
       if (Object.keys(next).length > 0) out["default_headers"] = next
       else delete out["default_headers"]
     }
@@ -489,9 +506,9 @@ export namespace SessionAgencySwarm {
     }
   }
 
-  function getEnvForClientConfig(): Record<string, string | undefined> {
+  async function getEnvForClientConfig(): Promise<Record<string, string | undefined>> {
     try {
-      return Env.all()
+      return await Env.all()
     } catch (error) {
       log.error("failed to read Env service while building agency-swarm client_config; falling back to process.env", {
         error: error instanceof Error ? error.message : String(error),
@@ -729,6 +746,8 @@ export namespace SessionAgencySwarm {
       if (itemType === "mcp_call") return stringifyToolOutput(item["result"] ?? item)
       return stringifyToolOutput(item)
     }
+
+    const isToolOutputItem = (itemType: string) => itemType.endsWith("_output") || isAgencyToolOutputType(itemType)
 
     const findCallID = (event: Record<string, unknown>, item: Record<string, unknown> | undefined) => {
       const direct = asString(event["call_id"])
@@ -1181,12 +1200,14 @@ export namespace SessionAgencySwarm {
       for (const raw of newMessages) {
         const message = asRecord(raw)
         if (!message || asString(message["type"]) !== "message") continue
+        const messageMeta = extractEventMeta(message)
+        if (asString(message["role"]) === "assistant") await applyAssistantLabel(input.assistantMessage, messageMeta)
         const itemID = asString(message["id"])
         if (!itemID) continue
         const text = extractMessageText(message)
         if (!text) continue
         if (shouldSkipDuplicateAssistantText(itemID, 0, text)) continue
-        yield* finishText(itemID, 0, text, {}, { source: "messages" })
+        yield* finishText(itemID, 0, text, messageMeta, { source: "messages" })
       }
     }
 
@@ -1236,7 +1257,7 @@ export namespace SessionAgencySwarm {
         )
       }
 
-      if (itemType.endsWith("_output")) {
+      if (isToolOutputItem(itemType)) {
         const callID = asString(item["call_id"])
         if (!callID) return []
         const tool = ensureTool(callID, toolNameFor(callID))
@@ -1285,7 +1306,7 @@ export namespace SessionAgencySwarm {
           })
       }
 
-      if (itemType.endsWith("_output")) {
+      if (isToolOutputItem(itemType)) {
         const callID = asString(item["call_id"])
         if (!callID) return []
         const tool = ensureTool(callID, toolNameFor(callID))
@@ -1482,10 +1503,25 @@ export namespace SessionAgencySwarm {
       yield { type: "start" }
       yield { type: "start-step" }
       let streamError: Error | undefined
+      let rebuiltHistoryFromMessages: Array<Record<string, unknown>> | undefined
 
       const history = await AgencySwarmHistory.load(scope)
       const chatHistory = await Session.messages({ sessionID: input.sessionID })
-        .then((msgs) => compactHistory({ msgs, currentID: input.userMessage.info.id }) ?? history.chat_history)
+        .then((msgs) => {
+          const compacted = compactHistory({ msgs, currentID: input.userMessage.info.id })
+          if (compacted) return compacted
+          // Forked sessions clone local messages but get a fresh AgencySwarmHistory key, so the bridge
+          // would otherwise start with no context. Rebuild from the cloned messages when stored history
+          // is empty and prior messages are all agency-swarm.
+          if (history.chat_history.length === 0) {
+            const rebuilt = buildAgencyHistoryFromMessages({ msgs, currentID: input.userMessage.info.id })
+            if (rebuilt && rebuilt.length > 0) {
+              rebuiltHistoryFromMessages = rebuilt
+              return rebuilt
+            }
+          }
+          return history.chat_history
+        })
         .catch((error) => {
           log.warn("unable to rebuild compacted agency history; falling back to stored history", {
             sessionID: input.sessionID,
@@ -1501,6 +1537,7 @@ export namespace SessionAgencySwarm {
         timeoutMs: input.options.discoveryTimeoutMs,
         mentionedRecipient,
         configuredRecipient: input.options.recipientAgent,
+        configuredRecipientSelectedAt: input.options.recipientAgentSelectedAt,
       })
       const sessionLitellmModel =
         input.sessionModel &&
@@ -1514,6 +1551,10 @@ export namespace SessionAgencySwarm {
         input.options.forwardUpstreamCredentials,
         sessionLitellmModel,
       )
+
+      if (rebuiltHistoryFromMessages) {
+        await AgencySwarmHistory.appendMessages(scope, rebuiltHistoryFromMessages)
+      }
 
       try {
         for await (const frame of AgencySwarmAdapter.streamRun({
@@ -1574,7 +1615,9 @@ export namespace SessionAgencySwarm {
           }
           if (kind === "agent_updated_stream_event") {
             const next = asRecord(frame.payload["new_agent"])
-            const maybeName = next ? asString(next["name"]) : undefined
+            const maybeName = next
+              ? (asString(next["id"]) ?? asString(next["name"]) ?? asString(next["label"]))
+              : undefined
             if (maybeName) {
               input.assistantMessage.agent = maybeName
               input.assistantMessage.mode = maybeName
@@ -1883,17 +1926,34 @@ export namespace SessionAgencySwarm {
     timeoutMs: number
     mentionedRecipient?: string
     configuredRecipient?: string
+    configuredRecipientSelectedAt?: number
   }): Promise<string | undefined> {
     const sessionRecipient = await resolveSessionRecipient(input.sessionID)
+    if (
+      !input.configuredRecipient &&
+      input.configuredRecipientSelectedAt &&
+      input.configuredRecipientSelectedAt > (sessionRecipient?.messageAt ?? 0)
+    ) {
+      return undefined
+    }
+    type RecipientCandidate = {
+      value: {
+        agent: string
+        messageAt?: number
+      }
+      source: "message" | "config" | "session"
+    }
     const candidates = [
-      { value: input.mentionedRecipient, source: "message" },
-      { value: input.configuredRecipient, source: "config" },
-      { value: sessionRecipient, source: "session" },
-    ].filter(
-      (candidate, index, array): candidate is { value: string; source: "message" | "config" | "session" } =>
-        !!candidate.value && array.findIndex((item) => item.value === candidate.value) === index,
-    )
-    const candidateValues = candidates.map((candidate) => candidate.value)
+      input.mentionedRecipient ? { value: { agent: input.mentionedRecipient }, source: "message" } : undefined,
+      sessionRecipient ? { value: sessionRecipient, source: "session" } : undefined,
+      input.configuredRecipient ? { value: { agent: input.configuredRecipient }, source: "config" } : undefined,
+    ]
+      .filter((candidate): candidate is RecipientCandidate => !!candidate?.value.agent)
+      .sort((a, b) => candidateRank(a) - candidateRank(b))
+      .filter(
+        (candidate, index, array) => array.findIndex((item) => item.value.agent === candidate.value.agent) === index,
+      )
+    const candidateValues = candidates.map((candidate) => candidate.value.agent)
     if (candidateValues.length === 0) {
       return undefined
     }
@@ -1928,18 +1988,28 @@ export namespace SessionAgencySwarm {
 
     const availableAgents = Array.from(new Set(recipientMap.values()))
     for (const candidate of candidates) {
-      const resolved = recipientMap.get(candidate.value)
+      const resolved = recipientMap.get(candidate.value.agent)
       if (resolved) return resolved
       log.warn("ignoring stale recipient agent candidate", {
         sessionID: input.sessionID,
         agency: input.agency,
-        candidate: candidate.value,
+        candidate: candidate.value.agent,
         source: candidate.source,
         availableAgents,
       })
     }
 
     return undefined
+
+    function candidateRank(candidate: RecipientCandidate) {
+      if (candidate.source === "message") return 0
+      if (candidate.source === "config" && input.configuredRecipientSelectedAt) {
+        const sessionMessageAt = sessionRecipient?.messageAt ?? 0
+        if (input.configuredRecipientSelectedAt > sessionMessageAt) return 1
+      }
+      if (candidate.source === "session") return 2
+      return 3
+    }
   }
 
   async function resolveSessionRecipient(sessionID: SessionID) {
@@ -1953,7 +2023,10 @@ export namespace SessionAgencySwarm {
       })
       if (!last) return
       if (last.info.role !== "assistant") return
-      return last.info.agent
+      return {
+        agent: last.info.agent,
+        messageAt: last.info.time.completed ?? last.info.time.created,
+      }
     } catch (error) {
       log.warn("unable to load session recipient; skipping recipient override", {
         sessionID,
@@ -1981,42 +2054,56 @@ export namespace SessionAgencySwarm {
     const slice = input.msgs.slice(start < 0 ? 0 : start)
     if (slice.some((msg) => msg.info.id !== input.currentID && !isAgencySwarmMessage(msg))) return
 
-    return slice.flatMap((msg) => {
-      if (msg.info.id === input.currentID) return []
+    return slice.flatMap((msg) => messageToHistoryItem(msg, input.currentID))
+  }
 
-      if (msg.info.role === "user") {
-        const text = buildOutgoingMessage(msg)
-        if (!text) return []
-        return [
-          {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text }],
-            agent: msg.info.agent,
-            callerAgent: null,
-            timestamp: msg.info.time.created,
-          },
-        ]
-      }
+  /**
+   * Rebuild bridge chat_history from local session messages. Used as a fallback when
+   * `AgencySwarmHistory` has no entry for the session (e.g. a forked session whose new sessionID
+   * never streamed before). Returns undefined when the prior messages are not all agency-swarm,
+   * to avoid sending mismatched-shape items into the bridge.
+   */
+  export function buildAgencyHistoryFromMessages(input: { msgs: MessageV2.WithParts[]; currentID: string }) {
+    if (input.msgs.length <= 1) return undefined
+    if (input.msgs.some((msg) => msg.info.id !== input.currentID && !isAgencySwarmMessage(msg))) return undefined
+    return input.msgs.flatMap((msg) => messageToHistoryItem(msg, input.currentID))
+  }
 
-      const text = msg.parts
-        .filter((part): part is MessageV2.TextPart => part.type === "text")
-        .filter((part) => !part.ignored)
-        .map((part) => part.text.trim())
-        .filter(Boolean)
-        .join("\n\n")
+  function messageToHistoryItem(msg: MessageV2.WithParts, currentID: string) {
+    if (msg.info.id === currentID) return []
+
+    if (msg.info.role === "user") {
+      const text = buildOutgoingMessage(msg)
       if (!text) return []
       return [
         {
           type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text }],
+          role: "user",
+          content: [{ type: "input_text", text }],
           agent: msg.info.agent,
-          callerAgent: extractCallerAgent(msg),
+          callerAgent: null,
           timestamp: msg.info.time.created,
         },
       ]
-    })
+    }
+
+    const text = msg.parts
+      .filter((part): part is MessageV2.TextPart => part.type === "text")
+      .filter((part) => !part.ignored)
+      .map((part) => part.text.trim())
+      .filter(Boolean)
+      .join("\n\n")
+    if (!text) return []
+    return [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+        agent: msg.info.agent,
+        callerAgent: extractCallerAgent(msg),
+        timestamp: msg.info.time.created,
+      },
+    ]
   }
 
   function extractCallerAgent(msg: MessageV2.WithParts): string | null {

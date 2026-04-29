@@ -11,18 +11,24 @@ import { useTheme } from "../context/theme"
 import { useLocal } from "@tui/context/local"
 import { TextAttributes } from "@opentui/core"
 import type { ProviderAuthAuthorization, ProviderAuthMethod } from "@opencode-ai/sdk/v2"
-import { DialogModel } from "./dialog-model"
 import { useKeyboard } from "@opentui/solid"
-import { Clipboard } from "@tui/util/clipboard"
+import * as Clipboard from "@tui/util/clipboard"
 import { useToast } from "../ui/toast"
 import { CONSOLE_MANAGED_ICON, isConsoleManagedProvider } from "@tui/util/provider-origin"
-import { getVisibleProviderAuthMethods, hasStoredProviderCredential } from "@tui/util/provider-auth"
+import {
+  getProviderAuthMethodSuffix,
+  getStoredProviderAuthMethod,
+  getVisibleProviderAuthMethods,
+  hasStoredProviderCredential,
+} from "@tui/util/provider-auth"
+import { refreshAfterProviderAuth } from "@tui/util/provider-auth-refresh"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
 import { isAgencySwarmFrameworkMode, isSupportedAgencyAuthProvider } from "../session-error"
 import { errorMessage as toErrorMessage } from "@/util/error"
-import { Log } from "@/util/log"
+import { Log } from "@/util"
 import open from "open"
 import type { Provider } from "@opencode-ai/sdk/v2"
+import { useConnected } from "./use-connected"
 
 const PROVIDER_PRIORITY: Record<string, number> = {
   openai: 0,
@@ -65,7 +71,8 @@ export function createDialogProviderOptionsWithFilter(props: DialogProviderProps
   const toast = useToast()
   const local = useLocal()
   const { theme } = useTheme()
-  const allowed = createMemo(() => new Set(props.providerIDs ?? []))
+  const onboarded = useConnected()
+  const allowed = createMemo(() => (props.providerIDs ? new Set(props.providerIDs) : undefined))
   const frameworkMode = createMemo(() =>
     isAgencySwarmFrameworkMode({
       currentProviderID: local.model.current()?.providerID,
@@ -76,26 +83,39 @@ export function createDialogProviderOptionsWithFilter(props: DialogProviderProps
   const options = createMemo(() => {
     return pipe(
       sync.data.provider_next.all,
-      (items) => (allowed().size ? items.filter((item) => allowed().has(item.id)) : items),
+      (items) => {
+        const allowedIDs = allowed()
+        return allowedIDs ? items.filter((item) => allowedIDs.has(item.id)) : items
+      },
       sortBy((x) => PROVIDER_PRIORITY[x.id] ?? 99),
       map((provider) => {
         const consoleManaged = isConsoleManagedProvider(sync.data.console_state.consoleManagedProviders, provider.id)
         const connected = sync.data.provider_next.connected.includes(provider.id)
 
-        return {
-          title: provider.name,
-          value: provider.id,
-          description: {
+        const storedAuthMethod = connected ? getStoredProviderAuthMethod(provider) : undefined
+        const description = ((): string | undefined => {
+          if (provider.id === "openai" && storedAuthMethod) {
+            if (storedAuthMethod === "oauth") return "(Browser sign-in)"
+            if (storedAuthMethod === "api") return "(API key)"
+            if (storedAuthMethod === "env") return "(API key from env)"
+            if (storedAuthMethod === "config") return "(API key from config)"
+          }
+          return {
             opencode: "(Recommended)",
             anthropic: "(API key)",
             openai: "(Browser sign-in or API key)",
             "opencode-go": "Low cost subscription for everyone",
-          }[provider.id],
+          }[provider.id]
+        })()
+        return {
+          title: provider.name,
+          value: provider.id,
+          description,
           footer: consoleManaged ? sync.data.console_state.activeOrgName : undefined,
           category: provider.id in PROVIDER_PRIORITY ? "Popular" : "Other",
           gutter: consoleManaged ? (
             <text fg={theme.textMuted}>{CONSOLE_MANAGED_ICON}</text>
-          ) : connected ? (
+          ) : connected && onboarded() ? (
             <text fg={theme.success}>✓</text>
           ) : undefined,
           async onSelect() {
@@ -113,6 +133,7 @@ export function createDialogProviderOptionsWithFilter(props: DialogProviderProps
                 frameworkMode: frameworkMode(),
               },
             )
+            const currentAuthMethod = getStoredProviderAuthMethod(provider)
             const visibleMethods = methods.length
               ? methods
               : [
@@ -130,6 +151,7 @@ export function createDialogProviderOptionsWithFilter(props: DialogProviderProps
                       title={`Select ${provider.name} auth method`}
                       options={visibleMethods.map((x, index) => ({
                         title: x.label,
+                        suffix: getProviderAuthMethodSuffix(x, currentAuthMethod),
                         value: index,
                       }))}
                       onSelect={(option) => resolve(option.value)}
@@ -237,8 +259,11 @@ function DialogRemoveCredential() {
           await sdk.client.auth.remove({
             providerID: provider.id,
           })
-          await sdk.client.instance.dispose()
-          await sync.bootstrap()
+          await refreshAfterProviderAuth({
+            sessionStatus: () => sync.data.session_status,
+            dispose: () => sdk.client.instance.dispose(),
+            bootstrap: () => sync.bootstrap(),
+          })
           toast.show({
             variant: "success",
             message: `${provider.name} credential removed`,
@@ -322,10 +347,7 @@ const ADDONS: Addon[] = [
 ]
 
 /** Prompt for each key of each selected add-on sequentially, writing to .env. */
-async function collectAddonKeys(
-  dialog: DialogContext,
-  selectedAddons: Addon[],
-): Promise<void> {
+async function collectAddonKeys(dialog: DialogContext, selectedAddons: Addon[]): Promise<void> {
   for (const addon of selectedAddons) {
     for (const keySpec of addon.keys) {
       const existing = readEnvKey(keySpec.env)
@@ -379,9 +401,7 @@ export function DialogAddons(props: { providerID: string; onDone: () => void }) 
         value: addon.id,
         description: addon.description,
         category: "Add-ons",
-        gutter: checked().has(addon.id)
-          ? <text fg={theme.success}>✓</text>
-          : <text fg={theme.textMuted}>○</text>,
+        gutter: checked().has(addon.id) ? <text fg={theme.success}>✓</text> : <text fg={theme.textMuted}>○</text>,
         onSelect: (_ctx: DialogContext) => {
           toggle(addon.id)
         },
@@ -389,13 +409,7 @@ export function DialogAddons(props: { providerID: string; onDone: () => void }) 
     ]
   })
 
-  return (
-    <DialogSelect
-      title="Enable add-ons  (optional)"
-      options={options()}
-      skipFilter
-    />
-  )
+  return <DialogSelect title="Enable add-ons  (optional)" options={options()} skipFilter />
 }
 
 /** In framework mode, skip the provider list and go straight to the OpenAI auth method selection. */
@@ -426,6 +440,7 @@ function DialogAuthOpenAI() {
       { frameworkMode: frameworkMode() },
     )
     const visibleMethods = methods.length ? methods : [{ type: "api" as const, label: "API key" }]
+    const currentAuthMethod = getStoredProviderAuthMethod(provider)
 
     let index: number | null = 0
     if (visibleMethods.length > 1) {
@@ -434,7 +449,11 @@ function DialogAuthOpenAI() {
           () => (
             <DialogSelect
               title="Select OpenAI auth method"
-              options={visibleMethods.map((x, i) => ({ title: x.label, value: i }))}
+              options={visibleMethods.map((x, i) => ({
+                title: x.label,
+                suffix: getProviderAuthMethodSuffix(x, currentAuthMethod),
+                value: i,
+              }))}
               onSelect={(option) => resolve(option.value)}
             />
           ),
@@ -499,10 +518,7 @@ export function DialogAuth() {
   const providerOptions = createDialogProviderOptionsWithFilter({})
 
   return (
-    <Show
-      when={frameworkMode()}
-      fallback={<DialogSelect title="Manage provider auth" options={providerOptions()} />}
-    >
+    <Show when={frameworkMode()} fallback={<DialogSelect title="Manage provider auth" options={providerOptions()} />}>
       <DialogAuthOpenAI />
     </Show>
   )
@@ -521,35 +537,6 @@ export function closeDialogAuthOnEscape(
   evt.stopPropagation()
   dialog.clear()
   return true
-}
-
-/** After auth in Agency Swarm mode, offer model selection (CLI model drives `client_config` for that provider). */
-function DialogPostAuthModelChoice(props: { providerID: string }) {
-  const dialog = useDialog()
-  const sync = useSync()
-  const providerName = createMemo(() => {
-    const p = sync.data.provider_next.all.find((x) => x.id === props.providerID)
-    return p?.name ?? props.providerID
-  })
-  return (
-    <DialogSelect
-      title={`${providerName()} connected`}
-      options={[
-        {
-          title: "Select model",
-          value: "model",
-          description: "Choose which model to use for this session",
-          onSelect: () => dialog.replace(() => <DialogModel providerID={props.providerID} />),
-        },
-        {
-          title: "Done",
-          value: "done",
-          description: "Keep your current model selection",
-          onSelect: () => dialog.clear(),
-        },
-      ]}
-    />
-  )
 }
 
 type Option =
@@ -768,8 +755,11 @@ export function DialogAgencySwarmConnect() {
       },
       { throwOnError: true },
     )
-    await sdk.client.instance.dispose()
-    await sync.bootstrap()
+    await refreshAfterProviderAuth({
+      sessionStatus: () => sync.data.session_status,
+      dispose: () => sdk.client.instance.dispose(),
+      bootstrap: () => sync.bootstrap(),
+    })
     dialog.clear()
     toast.show({
       variant: "success",
@@ -815,8 +805,13 @@ export function DialogAgencySwarmConnect() {
               },
             })
             .then(clearConfigToken)
-            .then(() => sdk.client.instance.dispose())
-            .then(() => sync.bootstrap())
+            .then(() =>
+              refreshAfterProviderAuth({
+                sessionStatus: () => sync.data.session_status,
+                dispose: () => sdk.client.instance.dispose(),
+                bootstrap: () => sync.bootstrap(),
+              }),
+            )
             .then(() => {
               toast.show({
                 variant: "success",
@@ -837,8 +832,13 @@ export function DialogAgencySwarmConnect() {
         providerID: AgencySwarmAdapter.PROVIDER_ID,
       })
       .then(clearConfigToken)
-      .then(() => sdk.client.instance.dispose())
-      .then(() => sync.bootstrap())
+      .then(() =>
+        refreshAfterProviderAuth({
+          sessionStatus: () => sync.data.session_status,
+          dispose: () => sdk.client.instance.dispose(),
+          bootstrap: () => sync.bootstrap(),
+        }),
+      )
       .then(() => {
         toast.show({
           variant: "success",
@@ -999,14 +999,16 @@ function AutoMethod(props: AutoMethodProps) {
       return
     }
     try {
-      await sdk.client.instance.dispose()
-      await sync.bootstrap()
-      dialog.replace(() => (
-        <DialogAddons
-          providerID={props.providerID}
-          onDone={() => dialog.clear()}
-        />
-      ))
+      await refreshAfterProviderAuth({
+        sessionStatus: () => sync.data.session_status,
+        dispose: () => sdk.client.instance.dispose(),
+        bootstrap: () => sync.bootstrap(),
+      })
+      if (frameworkMode()) {
+        dialog.replace(() => <DialogAddons providerID={props.providerID} onDone={() => dialog.clear()} />)
+      } else {
+        dialog.clear()
+      }
     } catch (error) {
       const message = toErrorMessage(error)
       log.error("provider oauth post-callback bootstrap failed", {
@@ -1084,15 +1086,13 @@ function CodeMethod(props: CodeMethodProps) {
         })
         if (!error) {
           try {
-            await sdk.client.instance.dispose()
-            await sync.bootstrap()
+            await refreshAfterProviderAuth({
+              sessionStatus: () => sync.data.session_status,
+              dispose: () => sdk.client.instance.dispose(),
+              bootstrap: () => sync.bootstrap(),
+            })
             if (frameworkMode()) {
-              dialog.replace(() => (
-                <DialogAddons
-                  providerID={props.providerID}
-                  onDone={() => dialog.clear()}
-                />
-              ))
+              dialog.replace(() => <DialogAddons providerID={props.providerID} onDone={() => dialog.clear()} />)
             } else {
               dialog.clear()
             }
@@ -1221,15 +1221,13 @@ function ApiMethod(props: ApiMethodProps) {
           return
         }
         try {
-          await sdk.client.instance.dispose()
-          await sync.bootstrap()
+          await refreshAfterProviderAuth({
+            sessionStatus: () => sync.data.session_status,
+            dispose: () => sdk.client.instance.dispose(),
+            bootstrap: () => sync.bootstrap(),
+          })
           if (frameworkMode()) {
-            dialog.replace(() => (
-              <DialogAddons
-                providerID={props.providerID}
-                onDone={() => dialog.clear()}
-              />
-            ))
+            dialog.replace(() => <DialogAddons providerID={props.providerID} onDone={() => dialog.clear()} />)
           } else {
             dialog.clear()
           }

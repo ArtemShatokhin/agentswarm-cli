@@ -47,7 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--status", choices=ACTIVE_STATUSES, default="open")
     add_parser.add_argument("--category", required=True)
     add_parser.add_argument("--title", required=True)
-    add_parser.add_argument("--original", required=True, help="Close original wording for auditability.")
+    add_parser.add_argument("--original", help="Close original wording for auditability.")
+    add_parser.add_argument("--original-file", type=Path, help="Read the original wording from a UTF-8 text file.")
     add_parser.add_argument("--intent", required=True)
     add_parser.add_argument("--next-action", required=True)
     add_parser.add_argument("--source-pointer", action="append", required=True, help="Repeat for multiple sources.")
@@ -63,11 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--category")
     update_parser.add_argument("--title")
     update_parser.add_argument("--original")
+    update_parser.add_argument("--original-file", type=Path, help="Read the original wording from a UTF-8 text file.")
     update_parser.add_argument("--intent")
     update_parser.add_argument("--next-action")
     update_parser.add_argument("--source-pointer", action="append", help="Append one or more source pointers.")
     update_parser.add_argument("--artifact", action="append", help="Append one or more artifacts if missing.")
-    update_parser.add_argument("--artifacts-clear", action="store_true", help="Clear the artifacts list.")
     update_parser.set_defaults(func=command_update)
 
     complete_parser = subparsers.add_parser("complete", help="Move an active item to the archive.")
@@ -116,7 +117,7 @@ def command_add(args: argparse.Namespace) -> None:
         "status": _required_text("status", args.status),
         "category": _required_text("category", args.category),
         "title": _required_text("title", args.title),
-        "original": _required_text("original", args.original),
+        "original": _text_argument("original", args.original, args.original_file, required=True, preserve_whitespace=True),
         "intent": _required_text("intent", args.intent),
         "next_action": _required_text("next_action", args.next_action),
         "source_pointers": [_required_text("source_pointer", source) for source in args.source_pointer],
@@ -136,26 +137,24 @@ def command_update(args: argparse.Namespace) -> None:
         "status": args.status,
         "category": args.category,
         "title": args.title,
-        "original": args.original,
         "intent": args.intent,
         "next_action": args.next_action,
     }
-    if args.artifacts_clear and args.artifact:
-        raise LedgerError("cannot combine --artifact with --artifacts-clear")
+    original = _text_argument("original", args.original, args.original_file, preserve_whitespace=True)
     if (
         not any(value is not None for value in updates.values())
+        and original is None
         and not args.source_pointer
         and not args.artifact
-        and not args.artifacts_clear
     ):
         raise LedgerError("update needs at least one field to change")
     for field, value in updates.items():
         if value is not None:
             item[field] = _required_text(field, value)
+    if original is not None:
+        item["original"] = original
     if args.source_pointer:
         item["source_pointers"].extend(_required_text("source_pointer", source) for source in args.source_pointer)
-    if args.artifacts_clear:
-        item["artifacts"] = []
     if args.artifact:
         item["artifacts"] = _merge_unique_texts(_read_artifacts(item), _optional_texts("artifact", args.artifact))
     item["updated_at"] = _now()
@@ -338,6 +337,38 @@ def _required_text(field: str, value: str) -> str:
     return text
 
 
+def _required_verbatim_text(field: str, value: str) -> str:
+    if not value.strip():
+        raise LedgerError(f"{field} cannot be empty")
+    return value
+
+
+def _text_argument(
+    field: str,
+    value: str | None,
+    file_path: Path | None,
+    *,
+    required: bool = False,
+    preserve_whitespace: bool = False,
+) -> str | None:
+    if value is not None and file_path is not None:
+        raise LedgerError(f"cannot combine --{field} with --{field}-file")
+    if file_path is not None:
+        try:
+            value = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise LedgerError(f"cannot decode {field} file as UTF-8: {file_path}") from exc
+        except OSError as exc:
+            raise LedgerError(f"cannot read {field} file: {file_path}") from exc
+    if value is None:
+        if required:
+            raise LedgerError(f"{field} is required")
+        return None
+    if preserve_whitespace:
+        return _required_verbatim_text(field, value)
+    return _required_text(field, value)
+
+
 def _optional_texts(field: str, values: list[str] | None) -> list[str]:
     if not values:
         return []
@@ -359,14 +390,23 @@ def _print_items(label: str, items: list[dict[str, Any]]) -> None:
     print(f"{label} ({len(items)})")
     for item in items:
         print(f"- {item['id']} [{item['status']}/{item['category']}] {item['title']}")
-        print(f"  original: {item['original']}")
-        print(f"  intent: {item['intent']}")
-        print(f"  next: {item.get('next_action', 'none')}")
+        _print_text_field("original", item["original"])
+        _print_text_field("intent", item["intent"])
+        _print_text_field("next", item.get("next_action", "none"))
         print(f"  source: {', '.join(item.get('source_pointers', []))}")
         if artifacts := _read_artifacts(item):
             print(f"  artifacts: {', '.join(artifacts)}")
         if item.get("resolution"):
-            print(f"  resolution: {item['resolution']}")
+            _print_text_field("resolution", item["resolution"])
+
+
+def _print_text_field(label: str, value: str) -> None:
+    prefix = f"  {label}: "
+    lines = value.splitlines() or [""]
+    print(f"{prefix}{lines[0]}")
+    continuation = " " * len(prefix)
+    for line in lines[1:]:
+        print(f"{continuation}{line}")
 
 
 if __name__ == "__main__":

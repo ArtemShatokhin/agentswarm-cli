@@ -2,9 +2,13 @@ name: Build OpenSwarm Binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to bake into the binary (e.g. 1.0.1). Leave blank to use agentswarm-cli package version."
+        required: false
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 jobs:
   build:
@@ -36,8 +40,20 @@ jobs:
         working-directory: packages/opencode
         run: bun install
 
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build binary
         working-directory: packages/opencode
+        env:
+          OPENSWARM_VERSION: ${{ steps.version.outputs.value }}
         run: bun run script/build.ts --single --skip-install
 
       - name: Rename binary (Unix)
@@ -59,4 +75,3 @@ jobs:
           name: agentswarm-${{ matrix.platform }}-${{ matrix.arch }}
           path: agentswarm-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.platform == 'windows' && '.exe' || '' }}
           if-no-files-found: error
-

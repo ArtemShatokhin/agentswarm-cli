@@ -1,4 +1,4 @@
-import { For } from "solid-js"
+import { createMemo, For } from "solid-js"
 import { useTheme } from "@tui/context/theme"
 import { AgencyProduct } from "@/agency-swarm/product"
 
@@ -28,9 +28,12 @@ function parse(tip: string): TipPart[] {
   return parts
 }
 
-export function Tips() {
+const NO_MODELS_TIP = "Run {highlight}/connect{/highlight} to add an AI provider and start coding"
+
+export function Tips(props: { connected?: boolean }) {
   const theme = useTheme().theme
-  const parts = parse(TIPS[Math.floor(Math.random() * TIPS.length)])
+  const randomTip = TIPS[Math.floor(Math.random() * TIPS.length)]
+  const parts = createMemo(() => parse(props.connected === false ? NO_MODELS_TIP : randomTip))
 
   return (
     <box flexDirection="row" maxWidth="100%">
@@ -38,7 +41,7 @@ export function Tips() {
         ● Tip{" "}
       </text>
       <text flexShrink={1}>
-        <For each={parts}>
+        <For each={parts()}>
           {(part) => <span style={{ fg: part.highlight ? theme.text : theme.textMuted }}>{part.text}</span>}
         </For>
       </text>
@@ -49,7 +52,7 @@ export function Tips() {
 const TIPS = AgencyProduct.tips([
   "Type {highlight}@{/highlight} followed by a filename to fuzzy search and attach files",
   "Start a message with {highlight}!{/highlight} to run shell commands directly (e.g., {highlight}!ls -la{/highlight})",
-  "Press {highlight}Tab{/highlight} to cycle between recipient agents in Run mode",
+  "Press {highlight}Tab{/highlight} to switch agents in Run mode",
   "Use {highlight}/undo{/highlight} to revert the last message and file changes",
   "Use {highlight}/redo{/highlight} to restore previously undone messages and file changes",
   "Run {highlight}/share{/highlight} to create a public link to your conversation at opencode.ai",
@@ -75,7 +78,7 @@ const TIPS = AgencyProduct.tips([
   "Press {highlight}Shift+Enter{/highlight} or {highlight}Ctrl+J{/highlight} to add newlines in your prompt",
   "Press {highlight}Ctrl+C{/highlight} when typing to clear the input field",
   "Press {highlight}Escape{/highlight} to stop the AI mid-response",
-  "Use {highlight}/agents{/highlight} to choose the active Run target before sending a message",
+  "Use {highlight}/agents{/highlight} to choose the active swarm or agent before sending a message",
   "Use {highlight}@agent-name{/highlight} in prompts to invoke specialized subagents",
   "Press {highlight}Ctrl+X Right/Left{/highlight} to cycle through parent and child sessions",
   "Create {highlight}agentswarm.json{/highlight} for server settings and {highlight}tui.json{/highlight} for TUI settings",

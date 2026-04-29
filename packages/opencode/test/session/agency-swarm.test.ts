@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { Auth } from "../../src/auth"
@@ -21,12 +21,10 @@ describe("session.agency-swarm", () => {
   const originalLoad = AgencySwarmHistory.load
   const originalAppendMessages = AgencySwarmHistory.appendMessages
   const originalSetLastRunID = AgencySwarmHistory.setLastRunID
-  const originalAuthAll = Auth.all
-  const originalEnvAll = Env.all
-  const originalProviderList = Provider.list
   const originalFetch = globalThis.fetch
 
   afterEach(() => {
+    mock.restore()
     AgencySwarmAdapter.discover = originalDiscover
     AgencySwarmAdapter.getMetadata = originalGetMetadata
     AgencySwarmAdapter.streamRun = originalStreamRun
@@ -34,9 +32,6 @@ describe("session.agency-swarm", () => {
     AgencySwarmHistory.load = originalLoad
     AgencySwarmHistory.appendMessages = originalAppendMessages
     AgencySwarmHistory.setLastRunID = originalSetLastRunID
-    Auth.all = originalAuthAll
-    Env.all = originalEnvAll
-    Provider.list = originalProviderList
     globalThis.fetch = originalFetch
   })
 
@@ -135,6 +130,22 @@ describe("session.agency-swarm", () => {
     expect(options.agency).toBeUndefined()
   })
 
+  test("optionsFromProvider reads manual recipient selection timestamp", () => {
+    const options = SessionAgencySwarm.optionsFromProvider({
+      id: "agency-swarm",
+      name: "agency-swarm",
+      key: undefined,
+      models: {},
+      options: {
+        recipientAgent: "slides_agent",
+        recipientAgentSelectedAt: 123,
+      },
+    } as any)
+
+    expect(options.recipientAgent).toBe("slides_agent")
+    expect(options.recipientAgentSelectedAt).toBe(123)
+  })
+
   test("resolveAgency returns configured agency without discovery", async () => {
     let called = false
     AgencySwarmAdapter.discover = (async () => {
@@ -231,7 +242,7 @@ describe("session.agency-swarm", () => {
 
   test("stream preserves explicit client_config without auto-merging LiteLLM auth", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "sk-openai" } as any,
       anthropic: { type: "api", key: "sk-ant" } as any,
       nova: { type: "api", key: "nova-key" } as any,
@@ -280,7 +291,7 @@ describe("session.agency-swarm", () => {
 
   test("stream does not forward stored API auth to remote agency-swarm servers", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "sk-openai" } as any,
       anthropic: { type: "api", key: "sk-ant" } as any,
     })) as typeof Auth.all
@@ -307,9 +318,42 @@ describe("session.agency-swarm", () => {
     })
   })
 
+  test("stream skips metadata lookup when remote non-openai sessions have no generated auth payload", async () => {
+    mockHistory()
+    spyOn(Auth, "all").mockImplementation(async () => ({
+      anthropic: { type: "api", key: "sk-ant" } as any,
+    })) as typeof Auth.all
+
+    let metadataCalls = 0
+    AgencySwarmAdapter.getMetadata = (async () => {
+      metadataCalls += 1
+      throw new Error("metadata should not be fetched")
+    }) as typeof AgencySwarmAdapter.getMetadata
+
+    let captured: Record<string, unknown> | undefined
+    AgencySwarmAdapter.streamRun = async function* (input) {
+      captured = input.clientConfig
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    input.options.baseURL = "https://agency.example.com"
+    input.sessionModel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" }
+
+    const stream = await SessionAgencySwarm.stream(input)
+    for await (const _event of stream.fullStream) {
+      // consume
+    }
+
+    expect(metadataCalls).toBe(0)
+    expect(captured).toEqual({
+      model: "litellm/anthropic/claude-sonnet-4-6",
+    })
+  })
+
   test("stream forwards stored API auth to remote URL when forwardUpstreamCredentials is true", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "sk-openai" } as any,
     })) as typeof Auth.all
 
@@ -335,7 +379,7 @@ describe("session.agency-swarm", () => {
 
   test("stream forwards stored API auth to 0.0.0.0 local agency-swarm servers", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "sk-openai" } as any,
       anthropic: { type: "api", key: "sk-ant" } as any,
     })) as typeof Auth.all
@@ -364,7 +408,7 @@ describe("session.agency-swarm", () => {
 
   test("stream forwards stored API auth to host.docker.internal (Docker Desktop)", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "sk-openai" } as any,
     })) as typeof Auth.all
 
@@ -458,7 +502,7 @@ describe("session.agency-swarm", () => {
     }
   })
 
-  test("stream strips Codex OAuth triplet in framework mode when stored keys reveal non-OpenAI routing", async () => {
+  test("stream forwards Codex OAuth when metadata reports agency-swarm 1.9.3+", async () => {
     mockHistory()
     await Auth.set("openai", {
       type: "oauth",
@@ -467,10 +511,10 @@ describe("session.agency-swarm", () => {
       expires: Date.now() + 60_000,
       accountId: "acct_123",
     } as any)
-    Env.all = (() => ({
+    spyOn(Env, "all").mockImplementation(() => ({
       ANTHROPIC_API_KEY: "env-anthropic",
     })) as typeof Env.all
-    Provider.list = (async () => ({
+    spyOn(Provider, "list").mockImplementation(async () => ({
       openai: {
         id: "openai",
         name: "OpenAI",
@@ -489,8 +533,25 @@ describe("session.agency-swarm", () => {
       },
     })) as typeof Provider.list
 
-    let body: Record<string, unknown> | undefined
+    let forwardedClientConfig: Record<string, unknown> | undefined
+    let downstreamAnthropicCall:
+      | {
+          apiKey?: string
+          baseURL?: string
+        }
+      | undefined
     const server = createServer(async (request, response) => {
+      if (request.url === "/builder/get_metadata") {
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(
+          JSON.stringify({
+            agency_swarm_version: "1.9.3",
+            metadata: { agents: ["AgentA"] },
+            nodes: [],
+          }),
+        )
+        return
+      }
       if (request.url !== "/builder/get_response_stream") {
         response.writeHead(404)
         response.end("not found")
@@ -501,7 +562,23 @@ describe("session.agency-swarm", () => {
         if (Buffer.isBuffer(chunk)) chunks.push(chunk)
         else chunks.push(Buffer.from(chunk))
       }
-      body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+      const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+      forwardedClientConfig = body["client_config"] as Record<string, unknown> | undefined
+      const litellmKeys =
+        forwardedClientConfig &&
+        typeof forwardedClientConfig["litellm_keys"] === "object" &&
+        forwardedClientConfig["litellm_keys"] !== null
+          ? (forwardedClientConfig["litellm_keys"] as Record<string, unknown>)
+          : undefined
+      const forwardedBaseURL =
+        forwardedClientConfig && typeof forwardedClientConfig["base_url"] === "string"
+          ? forwardedClientConfig["base_url"]
+          : undefined
+      downstreamAnthropicCall = {
+        apiKey: typeof litellmKeys?.["anthropic"] === "string" ? litellmKeys["anthropic"] : undefined,
+        // Mirrors the merged agency-swarm 1.9.3 contract from PR #630.
+        baseURL: forwardedBaseURL === "https://chatgpt.com/backend-api/codex" ? undefined : forwardedBaseURL,
+      }
       response.writeHead(200, { "Content-Type": "text/event-stream" })
       response.end(
         [
@@ -527,14 +604,22 @@ describe("session.agency-swarm", () => {
     try {
       const { input } = helper()
       input.options.baseURL = `http://127.0.0.1:${(address as AddressInfo).port}`
-      // No sessionModel set — framework mode leaves sessionLitellmModel undefined.
       const stream = await SessionAgencySwarm.stream(input)
-      for await (const _ of stream.fullStream) {
-        /* drain */
+      const text: string[] = []
+      for await (const event of stream.fullStream) {
+        if (event.type === "text-delta") text.push(event.text)
       }
 
-      expect(body?.["client_config"]).toEqual({
+      expect(text).toEqual(["ok"])
+      expect(forwardedClientConfig).toEqual({
+        api_key: "oauth-access",
+        base_url: "https://chatgpt.com/backend-api/codex",
+        default_headers: { "ChatGPT-Account-Id": "acct_123" },
         litellm_keys: { anthropic: "env-anthropic" },
+      })
+      expect(downstreamAnthropicCall).toEqual({
+        apiKey: "env-anthropic",
+        baseURL: undefined,
       })
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
@@ -542,7 +627,7 @@ describe("session.agency-swarm", () => {
     }
   })
 
-  test("stream strips Codex OAuth triplet in framework mode when explicit client_config reveals non-OpenAI routing", async () => {
+  test("stream keeps Codex OAuth triplet when explicit client_config reveals non-OpenAI routing on 1.9.3+", async () => {
     mockHistory()
     await Auth.set("openai", {
       type: "oauth",
@@ -551,8 +636,8 @@ describe("session.agency-swarm", () => {
       expires: Date.now() + 60_000,
       accountId: "acct_123",
     } as any)
-    Env.all = (() => ({})) as typeof Env.all
-    Provider.list = (async () => ({
+    spyOn(Env, "all").mockImplementation(() => ({})) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({
       openai: {
         id: "openai",
         name: "OpenAI",
@@ -565,6 +650,17 @@ describe("session.agency-swarm", () => {
 
     let body: Record<string, unknown> | undefined
     const server = createServer(async (request, response) => {
+      if (request.url === "/builder/get_metadata") {
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(
+          JSON.stringify({
+            agency_swarm_version: "1.9.3",
+            metadata: { agents: ["AgentA"] },
+            nodes: [],
+          }),
+        )
+        return
+      }
       if (request.url !== "/builder/get_response_stream") {
         response.writeHead(404)
         response.end("not found")
@@ -601,8 +697,6 @@ describe("session.agency-swarm", () => {
     try {
       const { input } = helper()
       input.options.baseURL = `http://127.0.0.1:${(address as AddressInfo).port}`
-      // Framework mode (sessionModel undefined). Stored Anthropic key is ABSENT;
-      // the only non-OpenAI routing signal is the user's explicit client_config.
       input.options.clientConfig = {
         litellm_keys: { anthropic: "manual-ant" },
       }
@@ -613,17 +707,18 @@ describe("session.agency-swarm", () => {
 
       const cfg = body?.["client_config"] as Record<string, unknown> | undefined
       expect(cfg).toEqual({
+        api_key: "oauth-access",
+        base_url: "https://chatgpt.com/backend-api/codex",
+        default_headers: { "ChatGPT-Account-Id": "acct_123" },
         litellm_keys: { anthropic: "manual-ant" },
       })
-      expect(cfg).not.toHaveProperty("base_url")
-      expect(cfg).not.toHaveProperty("api_key")
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
       await Auth.remove("openai")
     }
   })
 
-  test("stream strips Codex OAuth triplet when session model is a non-OpenAI LiteLLM provider", async () => {
+  test("stream keeps Codex OAuth triplet when a non-OpenAI session model targets 1.9.3+", async () => {
     mockHistory()
     await Auth.set("openai", {
       type: "oauth",
@@ -632,10 +727,10 @@ describe("session.agency-swarm", () => {
       expires: Date.now() + 60_000,
       accountId: "acct_123",
     } as any)
-    Env.all = (() => ({
+    spyOn(Env, "all").mockImplementation(() => ({
       ANTHROPIC_API_KEY: "env-anthropic",
     })) as typeof Env.all
-    Provider.list = (async () => ({
+    spyOn(Provider, "list").mockImplementation(async () => ({
       openai: {
         id: "openai",
         name: "OpenAI",
@@ -656,6 +751,212 @@ describe("session.agency-swarm", () => {
 
     let body: Record<string, unknown> | undefined
     const server = createServer(async (request, response) => {
+      if (request.url === "/builder/get_metadata") {
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(
+          JSON.stringify({
+            agency_swarm_version: "1.9.3",
+            metadata: { agents: ["AgentA"] },
+            nodes: [],
+          }),
+        )
+        return
+      }
+      if (request.url !== "/builder/get_response_stream") {
+        response.writeHead(404)
+        response.end("not found")
+        return
+      }
+      const chunks: Buffer[] = []
+      for await (const chunk of request) {
+        if (Buffer.isBuffer(chunk)) chunks.push(chunk)
+        else chunks.push(Buffer.from(chunk))
+      }
+      body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+      response.writeHead(200, { "Content-Type": "text/event-stream" })
+      response.end(
+        [
+          'data: {"data":{"type":"raw_response_event","data":{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"ok"}}}\n\n',
+          "event: end\ndata: [DONE]\n\n",
+        ].join(""),
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject)
+        resolve()
+      })
+    })
+
+    const address = server.address()
+    if (!address || typeof address === "string") {
+      server.close()
+      throw new Error("Expected local test server address")
+    }
+
+    try {
+      const { input } = helper()
+      input.options.baseURL = `http://127.0.0.1:${(address as AddressInfo).port}`
+      input.sessionModel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" }
+      const stream = await SessionAgencySwarm.stream(input)
+      for await (const _ of stream.fullStream) {
+        /* drain */
+      }
+
+      expect(body?.["client_config"]).toEqual({
+        api_key: "oauth-access",
+        base_url: "https://chatgpt.com/backend-api/codex",
+        default_headers: { "ChatGPT-Account-Id": "acct_123" },
+        litellm_keys: { anthropic: "env-anthropic" },
+        model: "litellm/anthropic/claude-sonnet-4-6",
+      })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+      await Auth.remove("openai")
+    }
+  })
+
+  test("stream strips Codex OAuth triplet when metadata reports agency-swarm 1.9.2", async () => {
+    mockHistory()
+    await Auth.set("openai", {
+      type: "oauth",
+      access: "oauth-access",
+      refresh: "oauth-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "acct_123",
+    } as any)
+    spyOn(Env, "all").mockImplementation(() => ({
+      ANTHROPIC_API_KEY: "env-anthropic",
+    })) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({
+      openai: {
+        id: "openai",
+        name: "OpenAI",
+        source: "oauth",
+        env: ["OPENAI_API_KEY"],
+        options: {},
+        models: {},
+      },
+      anthropic: {
+        id: "anthropic",
+        name: "Anthropic",
+        source: "api",
+        env: ["ANTHROPIC_API_KEY"],
+        options: {},
+        models: {},
+      },
+    })) as typeof Provider.list
+
+    let body: Record<string, unknown> | undefined
+    const server = createServer(async (request, response) => {
+      if (request.url === "/builder/get_metadata") {
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(
+          JSON.stringify({
+            agency_swarm_version: "1.9.2",
+            metadata: { agents: ["AgentA"] },
+            nodes: [],
+          }),
+        )
+        return
+      }
+      if (request.url !== "/builder/get_response_stream") {
+        response.writeHead(404)
+        response.end("not found")
+        return
+      }
+      const chunks: Buffer[] = []
+      for await (const chunk of request) {
+        if (Buffer.isBuffer(chunk)) chunks.push(chunk)
+        else chunks.push(Buffer.from(chunk))
+      }
+      body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+      response.writeHead(200, { "Content-Type": "text/event-stream" })
+      response.end(
+        [
+          'data: {"data":{"type":"raw_response_event","data":{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"ok"}}}\n\n',
+          "event: end\ndata: [DONE]\n\n",
+        ].join(""),
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject)
+        resolve()
+      })
+    })
+
+    const address = server.address()
+    if (!address || typeof address === "string") {
+      server.close()
+      throw new Error("Expected local test server address")
+    }
+
+    try {
+      const { input } = helper()
+      input.options.baseURL = `http://127.0.0.1:${(address as AddressInfo).port}`
+      input.sessionModel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" }
+      const stream = await SessionAgencySwarm.stream(input)
+      for await (const _ of stream.fullStream) {
+        /* drain */
+      }
+
+      expect(body?.["client_config"]).toEqual({
+        litellm_keys: { anthropic: "env-anthropic" },
+        model: "litellm/anthropic/claude-sonnet-4-6",
+      })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+      await Auth.remove("openai")
+    }
+  })
+
+  test("stream strips Codex OAuth triplet when metadata reports agency-swarm 1.9.3.dev1", async () => {
+    mockHistory()
+    await Auth.set("openai", {
+      type: "oauth",
+      access: "oauth-access",
+      refresh: "oauth-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "acct_123",
+    } as any)
+    spyOn(Env, "all").mockImplementation(() => ({
+      ANTHROPIC_API_KEY: "env-anthropic",
+    })) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({
+      openai: {
+        id: "openai",
+        name: "OpenAI",
+        source: "oauth",
+        env: ["OPENAI_API_KEY"],
+        options: {},
+        models: {},
+      },
+      anthropic: {
+        id: "anthropic",
+        name: "Anthropic",
+        source: "api",
+        env: ["ANTHROPIC_API_KEY"],
+        options: {},
+        models: {},
+      },
+    })) as typeof Provider.list
+
+    let body: Record<string, unknown> | undefined
+    const server = createServer(async (request, response) => {
+      if (request.url === "/builder/get_metadata") {
+        response.writeHead(200, { "Content-Type": "application/json" })
+        response.end(
+          JSON.stringify({
+            agency_swarm_version: "1.9.3.dev1",
+            metadata: { agents: ["AgentA"] },
+            nodes: [],
+          }),
+        )
+        return
+      }
       if (request.url !== "/builder/get_response_stream") {
         response.writeHead(404)
         response.end("not found")
@@ -717,10 +1018,10 @@ describe("session.agency-swarm", () => {
       expires: Date.now() + 60_000,
       accountId: "acct_123",
     } as any)
-    Env.all = (() => ({
+    spyOn(Env, "all").mockImplementation(() => ({
       ANTHROPIC_API_KEY: "env-anthropic",
     })) as typeof Env.all
-    Provider.list = (async () => ({
+    spyOn(Provider, "list").mockImplementation(async () => ({
       openai: {
         id: "openai",
         name: "OpenAI",
@@ -796,129 +1097,15 @@ describe("session.agency-swarm", () => {
     }
   })
 
-  test("stream keeps Codex OAuth triplet in framework mode when agency metadata only exposes OpenAI models", async () => {
-    mockHistory()
-    await Auth.set("openai", {
-      type: "oauth",
-      access: "oauth-access",
-      refresh: "oauth-refresh",
-      expires: Date.now() + 60_000,
-      accountId: "acct_123",
-    } as any)
-    Env.all = (() => ({
-      ANTHROPIC_API_KEY: "env-anthropic",
-    })) as typeof Env.all
-    Provider.list = (async () => ({
-      openai: {
-        id: "openai",
-        name: "OpenAI",
-        source: "oauth",
-        env: ["OPENAI_API_KEY"],
-        options: {},
-        models: {},
-      },
-      anthropic: {
-        id: "anthropic",
-        name: "Anthropic",
-        source: "api",
-        env: ["ANTHROPIC_API_KEY"],
-        options: {},
-        models: {},
-      },
-    })) as typeof Provider.list
-
-    let body: Record<string, unknown> | undefined
-    const metadata = {
-      nodes: [
-        {
-          id: "ExampleAgent",
-          type: "agent",
-          data: {
-            label: "ExampleAgent",
-            model: "gpt-5.4-mini",
-          },
-        },
-        {
-          id: "ExampleAgent2",
-          type: "agent",
-          data: {
-            label: "ExampleAgent2",
-            model: "gpt-5.4-mini",
-          },
-        },
-      ],
-      metadata: {
-        agents: ["ExampleAgent", "ExampleAgent2"],
-      },
-    }
-    const server = createServer(async (request, response) => {
-      if (request.url === "/builder/get_metadata") {
-        response.writeHead(200, { "Content-Type": "application/json" })
-        response.end(JSON.stringify(metadata))
-        return
-      }
-      if (request.url !== "/builder/get_response_stream") {
-        response.writeHead(404)
-        response.end("not found")
-        return
-      }
-      const chunks: Buffer[] = []
-      for await (const chunk of request) {
-        if (Buffer.isBuffer(chunk)) chunks.push(chunk)
-        else chunks.push(Buffer.from(chunk))
-      }
-      body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
-      response.writeHead(200, { "Content-Type": "text/event-stream" })
-      response.end(
-        [
-          'data: {"data":{"type":"raw_response_event","data":{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"ok"}}}\n\n',
-          "event: end\ndata: [DONE]\n\n",
-        ].join(""),
-      )
-    })
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject)
-      server.listen(0, "127.0.0.1", () => {
-        server.off("error", reject)
-        resolve()
-      })
-    })
-
-    const address = server.address()
-    if (!address || typeof address === "string") {
-      server.close()
-      throw new Error("Expected local test server address")
-    }
-
-    try {
-      const { input } = helper()
-      input.options.baseURL = `http://127.0.0.1:${(address as AddressInfo).port}`
-      const stream = await SessionAgencySwarm.stream(input)
-      for await (const _ of stream.fullStream) {
-        /* drain */
-      }
-
-      expect(body?.["client_config"]).toEqual({
-        api_key: "oauth-access",
-        base_url: "https://chatgpt.com/backend-api/codex",
-        default_headers: { "ChatGPT-Account-Id": "acct_123" },
-        litellm_keys: { anthropic: "env-anthropic" },
-      })
-    } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
-      await Auth.remove("openai")
-    }
-  })
-
   test("stream keeps stored OpenAI auth working when an Anthropic env key exists", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "stored-openai" } as any,
     })) as typeof Auth.all
-    Env.all = (() => ({
+    spyOn(Env, "all").mockImplementation(() => ({
       ANTHROPIC_API_KEY: "env-anthropic",
     })) as typeof Env.all
-    Provider.list = (async () => ({
+    spyOn(Provider, "list").mockImplementation(async () => ({
       openai: {
         id: "openai",
         name: "OpenAI",
@@ -999,9 +1186,9 @@ describe("session.agency-swarm", () => {
 
   test("stream forwards session UI model as client_config.model (litellm/ for non-OpenAI)", async () => {
     mockHistory()
-    Auth.all = (async () => ({})) as typeof Auth.all
-    Env.all = (() => ({})) as typeof Env.all
-    Provider.list = (async () => ({})) as typeof Provider.list
+    spyOn(Auth, "all").mockImplementation(async () => ({})) as typeof Auth.all
+    spyOn(Env, "all").mockImplementation(() => ({})) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({})) as typeof Provider.list
 
     let body: Record<string, unknown> | undefined
     const server = createServer(async (request, response) => {
@@ -1061,9 +1248,9 @@ describe("session.agency-swarm", () => {
 
   test("stream forwards session UI OpenAI model as bare model id", async () => {
     mockHistory()
-    Auth.all = (async () => ({})) as typeof Auth.all
-    Env.all = (() => ({})) as typeof Env.all
-    Provider.list = (async () => ({})) as typeof Provider.list
+    spyOn(Auth, "all").mockImplementation(async () => ({})) as typeof Auth.all
+    spyOn(Env, "all").mockImplementation(() => ({})) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({})) as typeof Provider.list
 
     let body: Record<string, unknown> | undefined
     const server = createServer(async (request, response) => {
@@ -1123,9 +1310,9 @@ describe("session.agency-swarm", () => {
 
   test("explicit client_config.model overrides session-derived model", async () => {
     mockHistory()
-    Auth.all = (async () => ({})) as typeof Auth.all
-    Env.all = (() => ({})) as typeof Env.all
-    Provider.list = (async () => ({})) as typeof Provider.list
+    spyOn(Auth, "all").mockImplementation(async () => ({})) as typeof Auth.all
+    spyOn(Env, "all").mockImplementation(() => ({})) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({})) as typeof Provider.list
 
     let body: Record<string, unknown> | undefined
     const server = createServer(async (request, response) => {
@@ -1330,18 +1517,18 @@ describe("session.agency-swarm", () => {
 
   test("stream prefers env OpenAI auth and forwards stored non-openai keys as litellm_keys", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: { type: "api", key: "stored-openai" } as any,
       anthropic: { type: "api", key: "stored-anthropic" } as any,
       azure: { type: "api", key: "stored-azure" } as any,
     })) as typeof Auth.all
-    Env.all = (() => ({
+    spyOn(Env, "all").mockImplementation(() => ({
       OPENAI_API_KEY: "env-openai",
       AZURE_RESOURCE_NAME: "azure-resource",
       AZURE_API_KEY: "env-azure",
       GOOGLE_GENERATIVE_AI_API_KEY: "env-google",
     })) as typeof Env.all
-    Provider.list = (async () => ({
+    spyOn(Provider, "list").mockImplementation(async () => ({
       openai: {
         id: "openai",
         name: "OpenAI",
@@ -1408,7 +1595,7 @@ describe("session.agency-swarm", () => {
 
   test("stream does not refresh stored OpenAI OAuth when explicit OpenAI client_config exists", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: {
         type: "oauth",
         access: "expired-access",
@@ -1440,7 +1627,7 @@ describe("session.agency-swarm", () => {
 
   test("stream keeps explicit base_url when stored OpenAI OAuth exists", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: {
         type: "oauth",
         access: "oauth-access",
@@ -1472,7 +1659,7 @@ describe("session.agency-swarm", () => {
 
   test("stream preserves stored OpenAI OAuth when explicit base_url still targets Codex", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: {
         type: "oauth",
         access: "oauth-access",
@@ -1509,7 +1696,7 @@ describe("session.agency-swarm", () => {
 
   test("stream skips failing stored OpenAI OAuth refresh but still forwards non-OpenAI litellm keys", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: {
         type: "oauth",
         access: "expired-access",
@@ -1541,7 +1728,7 @@ describe("session.agency-swarm", () => {
 
   test("stream preserves explicit header-based OpenAI auth without merging stored OAuth", async () => {
     mockHistory()
-    Auth.all = (async () => ({
+    spyOn(Auth, "all").mockImplementation(async () => ({
       openai: {
         type: "oauth",
         access: "oauth-access",
@@ -1907,6 +2094,110 @@ describe("session.agency-swarm", () => {
     expect(events.find((event) => event.type === "finish-step")?.finishReason).toBe("stop")
   })
 
+  test("stream clears stale handoff routing for later swarm selection and honors ExampleAgent2 selection", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        enabled_providers: ["agency-swarm"],
+        provider: {
+          "agency-swarm": {},
+        },
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        mockHistory()
+        const sentRecipients: Array<string | undefined> = []
+        AgencySwarmAdapter.getMetadata = (async () => ({
+          metadata: {
+            agents: ["ExampleAgent", "ExampleAgent2"],
+          },
+        })) as typeof AgencySwarmAdapter.getMetadata
+        AgencySwarmAdapter.streamRun = async function* (args) {
+          sentRecipients.push(args.recipientAgent ?? undefined)
+          yield { type: "end" }
+        } as typeof AgencySwarmAdapter.streamRun
+
+        const session = await Session.create({ title: "swarm selection clears stale handoff" })
+        const created = Date.now()
+        const user = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: {
+            providerID: ProviderID.make("agency-swarm"),
+            modelID: ModelID.make("default"),
+          },
+          time: {
+            created,
+          },
+        })
+        await Session.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "hello",
+        })
+        await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          parentID: user.id,
+          modelID: "default",
+          providerID: "agency-swarm",
+          mode: "ExampleAgent",
+          agent: "ExampleAgent",
+          path: {
+            cwd: "/",
+            root: "/",
+          },
+          cost: 0,
+          tokens: {
+            total: 0,
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          time: {
+            created: created + 1,
+            completed: created + 2,
+          },
+        } as any)
+
+        const swarmSelection = helper()
+        swarmSelection.input.sessionID = session.id
+        swarmSelection.input.assistantMessage.sessionID = session.id
+        swarmSelection.input.options.recipientAgent = undefined
+        ;(swarmSelection.input.options as any).recipientAgentSelectedAt = created + 3
+        swarmSelection.input.userMessage.info.id = MessageID.ascending()
+        swarmSelection.input.userMessage.parts = [{ type: "text", text: "use the swarm", ignored: false }] as any
+
+        const swarmStream = await SessionAgencySwarm.stream(swarmSelection.input)
+        for await (const _ of swarmStream.fullStream) {
+        }
+
+        const agentSelection = helper()
+        agentSelection.input.sessionID = session.id
+        agentSelection.input.assistantMessage.sessionID = session.id
+        agentSelection.input.options.recipientAgent = "ExampleAgent2"
+        ;(agentSelection.input.options as any).recipientAgentSelectedAt = created + 4
+        agentSelection.input.userMessage.info.id = MessageID.ascending()
+        agentSelection.input.userMessage.parts = [{ type: "text", text: "use agent 2", ignored: false }] as any
+
+        const agentStream = await SessionAgencySwarm.stream(agentSelection.input)
+        for await (const _ of agentStream.fullStream) {
+        }
+
+        expect(sentRecipients).toEqual([undefined, "ExampleAgent2"])
+      },
+    })
+  })
+
   test("compactHistory rebuilds request history from the compacted session slice", () => {
     const msgs = [
       {
@@ -2260,6 +2551,111 @@ describe("session.agency-swarm", () => {
     expect(SessionAgencySwarm.compactHistory({ msgs, currentID: "current" })).toBeUndefined()
   })
 
+  test("buildAgencyHistoryFromMessages rebuilds bridge history from cloned messages", () => {
+    const msgs = [
+      {
+        info: {
+          id: "user_1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "agency-swarm", modelID: "default" },
+          time: { created: 1 },
+        },
+        parts: [{ type: "text", text: "first question", ignored: false }],
+      },
+      {
+        info: {
+          id: "assistant_1",
+          role: "assistant",
+          parentID: "user_1",
+          providerID: "agency-swarm",
+          modelID: "default",
+          mode: "Default",
+          agent: "Reviewer",
+          path: { cwd: "/", root: "/" },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: 2 },
+          sessionID: "session_1",
+        },
+        parts: [{ type: "text", text: "first answer" }],
+      },
+      {
+        info: {
+          id: "current",
+          role: "user",
+          agent: "build",
+          model: { providerID: "agency-swarm", modelID: "default" },
+          time: { created: 3 },
+        },
+        parts: [{ type: "text", text: "follow up", ignored: false }],
+      },
+    ] as any
+
+    expect(SessionAgencySwarm.buildAgencyHistoryFromMessages({ msgs, currentID: "current" })).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "first question" }],
+        agent: "build",
+        callerAgent: null,
+        timestamp: 1,
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "first answer" }],
+        agent: "Reviewer",
+        callerAgent: null,
+        timestamp: 2,
+      },
+    ])
+  })
+
+  test("buildAgencyHistoryFromMessages returns undefined when only the current user message exists", () => {
+    const msgs = [
+      {
+        info: {
+          id: "current",
+          role: "user",
+          agent: "build",
+          model: { providerID: "agency-swarm", modelID: "default" },
+          time: { created: 1 },
+        },
+        parts: [{ type: "text", text: "first prompt", ignored: false }],
+      },
+    ] as any
+
+    expect(SessionAgencySwarm.buildAgencyHistoryFromMessages({ msgs, currentID: "current" })).toBeUndefined()
+  })
+
+  test("buildAgencyHistoryFromMessages bails out when prior messages are not all agency-swarm", () => {
+    const msgs = [
+      {
+        info: {
+          id: "user_1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "openai", modelID: "gpt-5" },
+          time: { created: 1 },
+        },
+        parts: [{ type: "text", text: "openai prompt", ignored: false }],
+      },
+      {
+        info: {
+          id: "current",
+          role: "user",
+          agent: "build",
+          model: { providerID: "agency-swarm", modelID: "default" },
+          time: { created: 2 },
+        },
+        parts: [{ type: "text", text: "follow up", ignored: false }],
+      },
+    ] as any
+
+    expect(SessionAgencySwarm.buildAgencyHistoryFromMessages({ msgs, currentID: "current" })).toBeUndefined()
+  })
+
   test("stream resolves configured recipient alias to live agent id from metadata", async () => {
     mockHistory()
     let sentRecipient: string | undefined
@@ -2434,6 +2830,104 @@ describe("session.agency-swarm", () => {
     expect(sentHistory).toEqual(storedHistory)
   })
 
+  test("stream rebuilds chat history from cloned messages when bridge history is empty", async () => {
+    const clonedAgencyMessages = [
+      {
+        info: {
+          id: "user_clone_1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "agency-swarm", modelID: "default" },
+          time: { created: 1 },
+        },
+        parts: [{ type: "text", text: "before fork", ignored: false }],
+      },
+      {
+        info: {
+          id: "assistant_clone_1",
+          role: "assistant",
+          parentID: "user_clone_1",
+          providerID: "agency-swarm",
+          modelID: "default",
+          mode: "Default",
+          agent: "Reviewer",
+          path: { cwd: "/", root: "/" },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: 2 },
+          sessionID: "session_1",
+        },
+        parts: [{ type: "text", text: "answer before fork" }],
+      },
+      {
+        info: {
+          id: "message_user_1",
+          role: "user",
+          agent: "build",
+          model: { providerID: "agency-swarm", modelID: "default" },
+          time: { created: 3 },
+        },
+        parts: [{ type: "text", text: "follow up after fork", ignored: false }],
+      },
+    ] as any
+
+    let sentHistory: unknown
+    const appendedHistory: unknown[] = []
+    AgencySwarmHistory.load = (async () => ({
+      scope: "http://127.0.0.1:8000|builder|session_1",
+      chat_history: [],
+      updated_at: Date.now(),
+    })) as typeof AgencySwarmHistory.load
+    AgencySwarmHistory.appendMessages = (async (_scope, messages) => {
+      appendedHistory.push(...(Array.isArray(messages) ? messages : []))
+      return {
+        scope: "scope",
+        chat_history: appendedHistory as Record<string, unknown>[],
+        updated_at: Date.now(),
+      }
+    }) as typeof AgencySwarmHistory.appendMessages
+    AgencySwarmHistory.setLastRunID = (async () => ({
+      scope: "scope",
+      chat_history: [],
+      updated_at: Date.now(),
+    })) as typeof AgencySwarmHistory.setLastRunID
+    AgencySwarmAdapter.streamRun = async function* (args) {
+      sentHistory = args.chatHistory
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const messagesSpy = spyOn(Session, "messages").mockResolvedValue(clonedAgencyMessages)
+    try {
+      const { input } = helper()
+      const stream = await SessionAgencySwarm.stream(input)
+      for await (const _ of stream.fullStream) {
+      }
+    } finally {
+      messagesSpy.mockRestore()
+    }
+
+    const rebuiltHistory = [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "before fork" }],
+        agent: "build",
+        callerAgent: null,
+        timestamp: 1,
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "answer before fork" }],
+        agent: "Reviewer",
+        callerAgent: null,
+        timestamp: 2,
+      },
+    ]
+    expect(sentHistory).toEqual(rebuiltHistory)
+    expect(appendedHistory).toEqual(rebuiltHistory)
+  })
+
   test("stream persists handed off recipient from session history", async () => {
     await using tmp = await tmpdir({
       git: true,
@@ -2531,7 +3025,232 @@ describe("session.agency-swarm", () => {
     })
   })
 
-  test("stream prefers configured recipient over persisted handed off recipient", async () => {
+  test("stream persists handed off recipient from final messages payload", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        enabled_providers: ["agency-swarm"],
+        provider: {
+          "agency-swarm": {},
+        },
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        mockHistory()
+        let turn = 0
+        let sentRecipient: string | undefined
+        AgencySwarmAdapter.getMetadata = (async () => ({
+          metadata: {
+            agents: ["support_agent", "MathAgent"],
+          },
+        })) as typeof AgencySwarmAdapter.getMetadata
+        AgencySwarmAdapter.streamRun = async function* (args) {
+          turn++
+          sentRecipient = args.recipientAgent ?? undefined
+          if (turn === 1) {
+            yield {
+              type: "data",
+              payload: {
+                type: "raw_response_event",
+                data: {
+                  type: "response.output_item.added",
+                  output_index: "1",
+                  item: {
+                    type: "function_call",
+                    id: "fc_handoff",
+                    call_id: "call_handoff",
+                    name: "transfer_to_support_agent",
+                    arguments: "{}",
+                  },
+                },
+              },
+            }
+            yield {
+              type: "messages",
+              payload: {
+                new_messages: [
+                  {
+                    type: "handoff_output_item",
+                    call_id: "call_handoff",
+                    output: '{"assistant":"support_agent"}',
+                  },
+                ],
+              },
+            }
+            yield {
+              type: "messages",
+              payload: {
+                new_messages: [
+                  {
+                    id: "agency_message_1",
+                    type: "message",
+                    role: "assistant",
+                    agent: "support_agent",
+                    content: [{ type: "output_text", text: "Transferred." }],
+                  },
+                ],
+              },
+            }
+          }
+          yield { type: "end" }
+        } as typeof AgencySwarmAdapter.streamRun
+
+        const session = await Session.create({ title: "messages handoff recipient" })
+        const user = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: {
+            providerID: ProviderID.make("agency-swarm"),
+            modelID: ModelID.make("default"),
+          },
+          time: {
+            created: Date.now(),
+          },
+        })
+        await Session.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "hello",
+        })
+
+        const first = helper()
+        first.input.sessionID = session.id
+        first.input.assistantMessage.sessionID = session.id
+        first.input.assistantMessage.id = MessageID.ascending()
+        first.input.assistantMessage.parentID = user.id
+        first.input.userMessage.info.id = user.id
+        first.input.options.recipientAgent = "MathAgent"
+
+        const firstStream = await SessionAgencySwarm.stream(first.input)
+        for await (const _ of firstStream.fullStream) {
+        }
+
+        const second = helper()
+        second.input.sessionID = session.id
+        second.input.assistantMessage.sessionID = session.id
+        second.input.assistantMessage.id = MessageID.ascending()
+        second.input.userMessage.info.id = MessageID.ascending()
+        second.input.userMessage.parts = [{ type: "text", text: "follow up", ignored: false }] as any
+        second.input.options.recipientAgent = "MathAgent"
+
+        const secondStream = await SessionAgencySwarm.stream(second.input)
+        for await (const _ of secondStream.fullStream) {
+        }
+
+        expect(sentRecipient).toBe("support_agent")
+      },
+    })
+  })
+
+  test("stream routes next message to agent_updated handoff id", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        enabled_providers: ["agency-swarm"],
+        provider: {
+          "agency-swarm": {},
+        },
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        mockHistory()
+        let sentRecipient: string | undefined
+        AgencySwarmAdapter.getMetadata = (async () => ({
+          metadata: {
+            agents: ["orchestrator", "slides_agent"],
+          },
+          nodes: [
+            {
+              id: "slides_agent",
+              type: "agent",
+              data: {
+                label: "Slides Agent",
+              },
+            },
+          ],
+        })) as typeof AgencySwarmAdapter.getMetadata
+        let turn = 0
+        AgencySwarmAdapter.streamRun = async function* (args) {
+          turn++
+          if (turn === 1) {
+            yield {
+              type: "data",
+              payload: {
+                type: "agent_updated_stream_event",
+                new_agent: {
+                  id: "slides_agent",
+                  label: "Slides Agent",
+                },
+              },
+            }
+            yield { type: "end" }
+            return
+          }
+          sentRecipient = args.recipientAgent ?? undefined
+          yield { type: "end" }
+        } as typeof AgencySwarmAdapter.streamRun
+
+        const session = await Session.create({ title: "handoff event recipient" })
+        const user = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: {
+            providerID: ProviderID.make("agency-swarm"),
+            modelID: ModelID.make("default"),
+          },
+          time: {
+            created: Date.now(),
+          },
+        })
+        await Session.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "make slides",
+        })
+        const first = helper()
+        first.input.sessionID = session.id
+        first.input.assistantMessage.sessionID = session.id
+        first.input.assistantMessage.parentID = user.id
+        first.input.assistantMessage.id = MessageID.ascending()
+        first.input.userMessage.info.id = user.id
+
+        const firstStream = await SessionAgencySwarm.stream(first.input)
+        for await (const _ of firstStream.fullStream) {
+        }
+
+        expect(first.input.assistantMessage.agent).toBe("slides_agent")
+
+        const second = helper()
+        second.input.sessionID = session.id
+        second.input.assistantMessage.sessionID = session.id
+        second.input.assistantMessage.id = MessageID.ascending()
+        second.input.userMessage.info.id = MessageID.ascending()
+        second.input.userMessage.parts = [{ type: "text", text: "continue", ignored: false }] as any
+
+        const secondStream = await SessionAgencySwarm.stream(second.input)
+        for await (const _ of secondStream.fullStream) {
+        }
+
+        expect(sentRecipient).toBe("slides_agent")
+      },
+    })
+  })
+
+  test("stream prefers persisted handed off recipient over unmarked configured recipient", async () => {
     await using tmp = await tmpdir({
       git: true,
       config: {
@@ -2566,7 +3285,8 @@ describe("session.agency-swarm", () => {
           yield { type: "end" }
         } as typeof AgencySwarmAdapter.streamRun
 
-        const session = await Session.create({ title: "configured recipient override" })
+        const session = await Session.create({ title: "handoff recipient over default config" })
+        const created = Date.now()
         const user = await Session.updateMessage({
           id: MessageID.ascending(),
           role: "user",
@@ -2577,7 +3297,7 @@ describe("session.agency-swarm", () => {
             modelID: ModelID.make("default"),
           },
           time: {
-            created: Date.now(),
+            created,
           },
         })
         await Session.updatePart({
@@ -2609,8 +3329,8 @@ describe("session.agency-swarm", () => {
             cache: { read: 0, write: 0 },
           },
           time: {
-            created: Date.now(),
-            completed: Date.now(),
+            created: created + 1,
+            completed: created + 2,
           },
         } as any)
 
@@ -2624,7 +3344,209 @@ describe("session.agency-swarm", () => {
         for await (const _ of stream.fullStream) {
         }
 
+        expect(sentRecipient).toBe("support_agent")
+      },
+    })
+  })
+
+  test("stream prefers later manual recipient selection over persisted handed off recipient", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        enabled_providers: ["agency-swarm"],
+        provider: {
+          "agency-swarm": {},
+        },
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        mockHistory()
+        let sentRecipient: string | undefined
+        AgencySwarmAdapter.getMetadata = (async () => ({
+          metadata: {
+            agents: ["support_agent", "MathAgent"],
+          },
+          nodes: [
+            {
+              id: "support_agent",
+              type: "agent",
+              data: {
+                label: "UserSupportAgent",
+              },
+            },
+          ],
+        })) as typeof AgencySwarmAdapter.getMetadata
+        AgencySwarmAdapter.streamRun = async function* (args) {
+          sentRecipient = args.recipientAgent ?? undefined
+          yield { type: "end" }
+        } as typeof AgencySwarmAdapter.streamRun
+
+        const session = await Session.create({ title: "manual recipient override" })
+        const created = Date.now()
+        const user = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: {
+            providerID: ProviderID.make("agency-swarm"),
+            modelID: ModelID.make("default"),
+          },
+          time: {
+            created,
+          },
+        })
+        await Session.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "hello",
+        })
+        await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          parentID: user.id,
+          modelID: "default",
+          providerID: "agency-swarm",
+          mode: "UserSupportAgent",
+          agent: "UserSupportAgent",
+          path: {
+            cwd: "/",
+            root: "/",
+          },
+          cost: 0,
+          tokens: {
+            total: 0,
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          time: {
+            created: created + 1,
+            completed: created + 2,
+          },
+        } as any)
+
+        const { input } = helper()
+        input.sessionID = session.id
+        input.assistantMessage.sessionID = session.id
+        input.options.recipientAgent = "MathAgent"
+        ;(input.options as any).recipientAgentSelectedAt = created + 3
+        input.userMessage.info.id = MessageID.ascending()
+        input.userMessage.parts = [{ type: "text", text: "follow up", ignored: false }] as any
+        const stream = await SessionAgencySwarm.stream(input)
+        for await (const _ of stream.fullStream) {
+        }
+
         expect(sentRecipient).toBe("MathAgent")
+      },
+    })
+  })
+
+  test("stream prefers completed handoff over recipient selected during that response", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: {
+        enabled_providers: ["agency-swarm"],
+        provider: {
+          "agency-swarm": {},
+        },
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        mockHistory()
+        let sentRecipient: string | undefined
+        AgencySwarmAdapter.getMetadata = (async () => ({
+          metadata: {
+            agents: ["support_agent", "MathAgent"],
+          },
+          nodes: [
+            {
+              id: "support_agent",
+              type: "agent",
+              data: {
+                label: "UserSupportAgent",
+              },
+            },
+          ],
+        })) as typeof AgencySwarmAdapter.getMetadata
+        AgencySwarmAdapter.streamRun = async function* (args) {
+          sentRecipient = args.recipientAgent ?? undefined
+          yield { type: "end" }
+        } as typeof AgencySwarmAdapter.streamRun
+
+        const session = await Session.create({ title: "completed handoff override" })
+        const handoffStartedAt = Date.now()
+        const handoffCompletedAt = handoffStartedAt + 10
+        const user = await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: {
+            providerID: ProviderID.make("agency-swarm"),
+            modelID: ModelID.make("default"),
+          },
+          time: {
+            created: handoffStartedAt - 1,
+          },
+        })
+        await Session.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "hello",
+        })
+        await Session.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: session.id,
+          parentID: user.id,
+          modelID: "default",
+          providerID: "agency-swarm",
+          mode: "UserSupportAgent",
+          agent: "UserSupportAgent",
+          path: {
+            cwd: "/",
+            root: "/",
+          },
+          cost: 0,
+          tokens: {
+            total: 0,
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          time: {
+            created: handoffStartedAt,
+            completed: handoffCompletedAt,
+          },
+        } as any)
+
+        const { input } = helper()
+        input.sessionID = session.id
+        input.assistantMessage.sessionID = session.id
+        input.options.recipientAgent = "MathAgent"
+        ;(input.options as any).recipientAgentSelectedAt = handoffStartedAt + 1
+        input.userMessage.info.id = MessageID.ascending()
+        input.userMessage.parts = [{ type: "text", text: "follow up", ignored: false }] as any
+
+        const stream = await SessionAgencySwarm.stream(input)
+        for await (const _ of stream.fullStream) {
+        }
+
+        expect(sentRecipient).toBe("support_agent")
       },
     })
   })
@@ -2925,6 +3847,71 @@ describe("session.agency-swarm", () => {
     expect(events.some((event) => event.type === "finish-step")).toBeFalse()
     expect(events.some((event) => event.type === "finish")).toBeFalse()
     expect(events.at(-1)?.type).toBe("error")
+  })
+
+  test("stream completes Agency Swarm handoff output items instead of leaving transfer tools aborted", async () => {
+    mockHistory()
+    AgencySwarmAdapter.streamRun = async function* () {
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_item.added",
+            output_index: "2",
+            item: {
+              type: "function_call",
+              id: "fc_handoff",
+              call_id: "call_handoff",
+              name: "transfer_to_slides_agent",
+              arguments: "{}",
+            },
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_item.done",
+            output_index: "2",
+            item: {
+              type: "function_call",
+              id: "fc_handoff",
+              call_id: "call_handoff",
+              name: "transfer_to_slides_agent",
+              arguments: "{}",
+            },
+          },
+        },
+      }
+      yield {
+        type: "messages",
+        payload: {
+          new_messages: [
+            {
+              type: "handoff_output_item",
+              call_id: "call_handoff",
+              output: '{"assistant":"Slides Agent"}',
+            },
+          ],
+        },
+      }
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    const stream = await SessionAgencySwarm.stream(input)
+    const events: any[] = []
+    for await (const event of stream.fullStream) {
+      events.push(event)
+    }
+
+    expect(events.some((event) => event.type === "tool-error")).toBeFalse()
+    expect(events.some((event) => event.type === "error")).toBeFalse()
+    expect(events.find((event) => event.type === "tool-result")?.toolCallId).toBe("call_handoff")
+    expect(events.find((event) => event.type === "finish-step")?.finishReason).toBe("stop")
   })
 
   test("stream sends cancel after meta when user cancels before run id is known", async () => {
