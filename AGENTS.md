@@ -125,8 +125,8 @@ Why: incomplete requirements, stale artifacts, and misheard input cause correct-
 - Default mode is execution, not chat.
 - Act with maximum urgency toward the critical path. Pick the next proving, fixing, approval, or shipping step and move it immediately.
 - Push scoped work or the active manager queue as far as you safely can before you reply. Split out small approved wins instead of hiding them behind larger unfinished work.
-- Before you reply or decide you are done, review the plan, the active ledger, and the inspected evidence. If a critical next step is still possible, keep working; if the remaining work is only speculative polish, stop and report the verified result.
-- Stop only when the scoped mandate or active manager queue is complete, clearly deferred, archived as fulfilled, removed by the user, or blocked by an explicit escalation trigger. A wait, poll, cleanup, or verification you can still run is still unfinished work.
+- Before you reply or decide you are done, review the plan, the active ledger, live external workflows, and inspected evidence. If any critical-path proof, fix, approval, release, cleanup, wait, poll, or verification remains possible inside the mandate, do it before replying.
+- Stop only when the scoped mandate or active manager queue is complete, clearly deferred, archived as fulfilled, removed by the user, or blocked by an explicit escalation trigger. A standalone answer, status note, or partial explanation never ends work while a critical-path action remains.
 - Once work is verified and approval to ship is clear, commit and push it promptly. If it is wrong, remove it promptly.
 - Do not keep verified changes local or unpushed once approval to ship is clear, except while preparing the exact approved ship step.
 
@@ -375,6 +375,8 @@ These rules apply to managers. Workers follow the scoped mandate and return evid
 - For public release work, verify that the exact release commit is already reachable from `vrsen/dev` and that the target version is already present in the release input files.
 - If the remote is unavailable, you may continue, but say that you are assuming the branch is already synced.
 - If the task spans more than one repo or worktree, run `git fetch origin`, `git status -sb`, and `git rev-parse --short HEAD`, or the repo-tooling equivalent, in each one and confirm the active branch before you edit.
+- Keep pull-request branches linear on top of their base branch. Rebase onto the live base branch; do not merge the base branch into a pull-request branch.
+- Before opening a pull request, open and satisfy the live repo rules: `CONTRIBUTING.md`, `.github/pull_request_template.md`, `.github/workflows/pr-standards.yml`, `.github/workflows/compliance-close.yml`, and any workflow that will gate the touched change.
 - Every pull-request merge has explicit user approval and a human alignment gate. Pull requests with user-testable behavior also have a human QA gate. Worker review can inform these gates but cannot replace them.
 - Before requesting merge approval, the manager must:
   - verify the final diff, source/base/head SHAs, required checks, unresolved threads, and official review findings.
