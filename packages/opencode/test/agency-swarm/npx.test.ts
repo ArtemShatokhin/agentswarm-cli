@@ -7,13 +7,11 @@ import {
   buildAgencyConfig,
   buildPythonEnv,
   detectAgencyProject,
-  formatProjectLabel,
   LAUNCHER_ENTRY_ENV,
   prepareProjectLaunch,
   resolveNpxAutoProject,
   shouldRunNpxOnboarding,
   summarizeBridgeStderr,
-  validateStarterName,
 } from "../../src/agency-swarm/npx"
 import { AgencySwarmRunSession } from "../../src/agency-swarm/run-session"
 import { Instance } from "../../src/project/instance"
@@ -130,6 +128,7 @@ describe("agency-swarm npx onboarding", () => {
       baseURL: "http://127.0.0.1:8123",
       agency: "local-agency",
       discoveryTimeoutMs: 2000,
+      clientConfig: { model: "gpt-5.4" },
       token: "server-token",
     })
   })
@@ -183,11 +182,11 @@ describe("agency-swarm npx onboarding", () => {
     await expect(
       prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       }),
     ).rejects.toThrow("fallback install failed")
 
-    const installCommand = commands.find((cmd) => cmd.includes("pip"))
+    const installCommand = commands.find((cmd) => cmd.includes("agency-swarm[fastapi,litellm]>=1.9.5"))
 
     expect(installCommand).toEqual([
       path.join(
@@ -245,7 +244,7 @@ describe("agency-swarm npx onboarding", () => {
             stderr: "",
           } as never
         }
-        if (cmd[0] === "python3.12") {
+        if (cmd[0] === "python3.12" || cmd[0] === "py" || cmd[0] === "python") {
           return {
             exited: Promise.resolve(0),
             stdout: `/usr/bin/python3.12\n3.12.7\n`,
@@ -281,7 +280,7 @@ describe("agency-swarm npx onboarding", () => {
     try {
       await prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       })
     } catch (caught) {
       error = caught as Error
@@ -334,6 +333,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: installExited,
@@ -346,7 +352,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     resolveInstall(1)
@@ -388,6 +394,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         let resolveExit!: (code: number) => void
         const exited = new Promise<number>((resolve) => {
@@ -409,7 +422,7 @@ describe("agency-swarm npx onboarding", () => {
     try {
       await prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       })
     } catch (caught) {
       error = caught as Error
@@ -457,6 +470,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         let resolveExit!: (code: number) => void
         const stderr = createTextOutputStream("still working...\n")
@@ -477,7 +497,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
     const pending = Symbol("pending")
     const outcome = await Promise.race([
@@ -530,6 +550,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         let resolveExit!: (code: number) => void
         const stderr = createTextOutputStream("still working...\n")
@@ -552,7 +579,7 @@ describe("agency-swarm npx onboarding", () => {
     await expect(
       prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       }),
     ).rejects.toThrow("Dependency install timed out after 10 minutes")
 
@@ -603,6 +630,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(0),
@@ -636,7 +670,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launchPromise = prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     await new Promise((resolve) => realSetTimeout(resolve, 20))
@@ -686,6 +720,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(1),
@@ -725,7 +766,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     expect(info).toHaveBeenCalledWith(
@@ -785,6 +826,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(1),
@@ -817,7 +865,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     const mirroredOutput = stderrWrite.mock.calls.map((call) => call[0]).join("")
@@ -886,6 +934,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(1),
@@ -918,7 +973,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     const mirroredOutput = stderrWrite.mock.calls.map((call) => call[0]).join("")
@@ -978,6 +1033,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(1),
@@ -1010,7 +1072,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     expect(warn).toHaveBeenCalledWith(
@@ -1076,7 +1138,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     const canaryScripts = commands.filter(isCanaryCommand).map((cmd) => cmd.at(-1) ?? "")
@@ -1141,6 +1203,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(0),
@@ -1170,7 +1239,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
     const pending = Symbol("pending")
     const outcome = await Promise.race([
@@ -1219,7 +1288,7 @@ describe("agency-swarm npx onboarding", () => {
     spyOn(prompts.log, "info").mockImplementation(() => undefined as never)
     spyOn(Date, "now").mockImplementation(() => {
       const value = now
-      now = 30001
+      now = 120001
       return value
     })
     spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready") as never)
@@ -1259,7 +1328,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
     const pending = Symbol("pending")
     const outcome = await Promise.race([
@@ -1343,7 +1412,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("Could not create launcher refresh log file"))
@@ -1385,6 +1454,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(0),
@@ -1417,7 +1493,7 @@ describe("agency-swarm npx onboarding", () => {
 
     const launch = await prepareProjectLaunch({
       directory: dir.path,
-      agencyFile: path.join(dir.path, "agency.py"),
+      agencyFile: path.join(dir.path, "swarm.py"),
     })
 
     expect(stderrWrite).toHaveBeenCalled()
@@ -1456,6 +1532,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         return {
           exited: Promise.resolve(1),
@@ -1469,7 +1552,7 @@ describe("agency-swarm npx onboarding", () => {
     await expect(
       prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       }),
     ).rejects.toThrow(`Dependency install failed: ${installStderr}`)
   })
@@ -1514,6 +1597,13 @@ describe("agency-swarm npx onboarding", () => {
           stderr: "",
         } as never
       }
+      if (isPipVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "pip 25.0\n",
+          stderr: "",
+        } as never
+      }
       if (isPipInstallCommand(cmd)) {
         let resolveExit!: (code: number) => void
         const exited = new Promise<number>((resolve) => {
@@ -1534,7 +1624,7 @@ describe("agency-swarm npx onboarding", () => {
     try {
       await prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       })
     } catch (caught) {
       error = caught as Error
@@ -1542,7 +1632,7 @@ describe("agency-swarm npx onboarding", () => {
 
     expect(error).toBeInstanceOf(Error)
     if (!error) throw new Error("Expected prepareProjectLaunch to fail")
-    expect(error.message).toBe("Dependency install timed out after 10 minutes.")
+    expect(error.message).toContain("Dependency install timed out after 10 minutes.")
   })
 
   test("prepareProjectLaunch avoids manifest remediation after fallback install canary failures", async () => {
@@ -1565,7 +1655,7 @@ describe("agency-swarm npx onboarding", () => {
     await expect(
       prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       }),
     ).rejects.toThrow(
       "Canary import failed on fallback install. Inspect the stderr below and check for project-local fastapi.py/agency_swarm.py that may shadow installed packages.",
@@ -1595,19 +1685,19 @@ describe("agency-swarm npx onboarding", () => {
     await expect(
       prepareProjectLaunch({
         directory: dir.path,
-        agencyFile: path.join(dir.path, "agency.py"),
+        agencyFile: path.join(dir.path, "swarm.py"),
       }),
     ).rejects.toThrow("Detected project-local fastapi.py, agency_swarm.py that may shadow installed packages.")
   })
 
-  test("detectAgencyProject requires agency.py with create_agency", async () => {
+  test("detectAgencyProject requires swarm.py with create_agency", async () => {
     await using dir = await tmpdir()
     await writeAgency(dir.path)
 
     const project = await detectAgencyProject(dir.path)
 
     expect(project?.directory).toBe(dir.path)
-    expect(project?.agencyFile).toBe(path.join(dir.path, "agency.py"))
+    expect(project?.agencyFile).toBe(path.join(dir.path, "swarm.py"))
   })
 
   test("detectAgencyProject only checks the selected directory", async () => {
@@ -1634,30 +1724,11 @@ describe("agency-swarm npx onboarding", () => {
 
   test("detectAgencyProject ignores unrelated python files", async () => {
     await using dir = await tmpdir()
-    await Bun.write(path.join(dir.path, "agency.py"), "print('hello')")
+    await Bun.write(path.join(dir.path, "swarm.py"), "print('hello')")
 
     const project = await detectAgencyProject(dir.path)
 
     expect(project).toBeUndefined()
-  })
-
-  test("formatProjectLabel includes the full project path", () => {
-    const root = path.join("/tmp", "workspace", "agency")
-
-    expect(
-      formatProjectLabel({
-        directory: root,
-        agencyFile: path.join(root, "agency.py"),
-      }),
-    ).toBe(`Use detected Agency Swarm project (${root})`)
-  })
-
-  test("validateStarterName rejects existing target folders", async () => {
-    await using dir = await tmpdir()
-    await mkdir(path.join(dir.path, "my-agency"))
-
-    expect(validateStarterName(dir.path, "my-agency")).toBe("A folder with this name already exists")
-    expect(validateStarterName(dir.path, "new-agency")).toBeUndefined()
   })
 
   test("resolveNpxAutoProject uses session directory for explicit session resumes", async () => {
@@ -2223,7 +2294,7 @@ describe("agency-swarm npx onboarding", () => {
 
 async function writeAgency(dir: string) {
   await Bun.write(
-    path.join(dir, "agency.py"),
+    path.join(dir, "swarm.py"),
     [
       "from agency_swarm import Agency",
       "",
@@ -2246,7 +2317,7 @@ function mockPrepareProjectLaunchCanaryFailure(canaryStderr: string) {
           stderr: "",
         } as never
       }
-      if (cmd[0] === "python3.12") {
+      if (cmd[0] === "python3.12" || cmd[0] === "py" || cmd[0] === "python") {
         return {
           exited: Promise.resolve(0),
           stdout: "/usr/bin/python3.12\n3.12.7\n",
@@ -2320,6 +2391,10 @@ function createTextOutputStream(initial?: string) {
 
 function isPipInstallCommand(cmd: string[]) {
   return cmd[1] === "-m" && cmd[2] === "pip" && cmd[3] === "install"
+}
+
+function isPipVersionCommand(cmd: string[]) {
+  return cmd[1] === "-m" && cmd[2] === "pip" && cmd[3] === "--version"
 }
 
 function isCanaryCommand(cmd: string[]) {
