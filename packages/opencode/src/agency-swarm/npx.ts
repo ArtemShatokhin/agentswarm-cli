@@ -846,7 +846,7 @@ async function ensureLatestAgencySwarm(
       )
     } else {
       const pip = await runCommand([...python, "-m", "pip", "--version"], { cwd: directory })
-      if (pip.code !== 0) return
+      if (pip.code !== 0) return { pipCorrupted: false }
       result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]"], {
         cwd: directory,
         logFile: options?.logFile,

@@ -823,3 +823,9 @@ Timeout error copy still uses `formatInstallDuration(VENV_CANARY_TIMEOUT_MS)`, s
 **Problem:** The TUI startup/exit guidance used the product command constant to render resume instructions, but the constant still pointed at `agentswarm`. On Windows this produced `agentswarm -s <session_id>`, which is not the registered command for this repo.
 
 **Change:** The product command is now `openswarm`, matching the global shim registered by the launcher and the command users can actually run.
+
+## 28. `packages/opencode/src/provider/provider.ts` - disable Agency Swarm timeout by default
+
+**Problem:** Existing OpenSwarm configs can declare the `agency-swarm` provider without the newer generated `timeout: false` option. In that case long slide/document generation runs can still be cut off by the generic provider request timeout, leaving visible tool calls without matching outputs and surfacing `Tool stream ended before output was received`.
+
+**Change:** The built-in Agency Swarm provider now defaults to `timeout: false`. Generated configs still include the explicit option, but older configs inherit the no-timeout default instead of timing out during long local bridge streams.
