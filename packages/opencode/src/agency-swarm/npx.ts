@@ -3,7 +3,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { createWriteStream, existsSync, statSync } from "node:fs"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { AgencySwarmAdapter } from "./adapter"
 import { AgencySwarmRunSession } from "./run-session"
 import { SERVER_LAUNCHER_SCRIPT } from "./server-launcher"
@@ -13,12 +13,9 @@ import type { Session } from "@/session"
 import { SessionID } from "@/session/schema"
 
 export const LAUNCHER_ENTRY_ENV = "AGENTSWARM_LAUNCHER"
-export const STARTER_TEMPLATE_REPO = "agency-ai-solutions/agency-starter-template"
+export const STARTER_TEMPLATE_REPO = "VRSEN/openswarm"
 export const STARTER_TEMPLATE_URL = `https://github.com/${STARTER_TEMPLATE_REPO}.git`
 export const LOCAL_AGENCY_ID = "local-agency"
-
-type LaunchChoice = "project" | "starter" | "connect"
-type StarterMode = "github" | "local"
 
 export interface PreparedNpxLaunch {
   directory: string
@@ -78,7 +75,7 @@ interface ServerStderrCollector {
 const VENV_CANARY_SCRIPT = ["import agency_swarm", "from agency_swarm.integrations.fastapi import run_fastapi"].join(
   "\n",
 )
-const VENV_CANARY_TIMEOUT_MS = 60 * 1000
+const VENV_CANARY_TIMEOUT_MS = 3 * 60 * 1000
 const SERVER_START_TIMEOUT_MS = 90 * 1000
 const SERVER_STDERR_COLLECT_TIMEOUT_MS = 1000
 const REBUILD_INSTALL_TIMEOUT_MS = 10 * 60 * 1000
@@ -339,6 +336,8 @@ export function buildAgencyConfig(input: { baseURL: string; agency: string; toke
           baseURL: input.baseURL,
           agency: input.agency,
           discoveryTimeoutMs: 2000,
+          timeout: false,
+          clientConfig: { model: "gpt-5.4" },
           ...(input.token ? { token: input.token } : {}),
         },
       },
@@ -356,7 +355,7 @@ export function buildPythonEnv(directory: string, env: NodeJS.ProcessEnv = proce
 
 export async function detectAgencyProject(directory: string) {
   const dir = path.resolve(directory)
-  const agencyFile = path.join(dir, "agency.py")
+  const agencyFile = path.join(dir, "swarm.py")
   if (!(await Filesystem.exists(agencyFile))) return
   const source = await Filesystem.readText(agencyFile).catch(() => "")
   if (!source.includes("def create_agency")) return
@@ -367,43 +366,15 @@ export async function detectAgencyProject(directory: string) {
   } satisfies AgencyProject
 }
 
-export function formatProjectLabel(project: AgencyProject) {
-  return `Use detected Agency Swarm project (${project.directory})`
-}
-
-export function validateStarterName(base: string, value?: string) {
-  const name = value?.trim()
-  if (!name) return "A name is required"
-  if (/[\\/:*?\"<>|]/.test(name)) return "Use a simple folder or repository name"
-  if (existsSync(path.join(base, name))) return "A folder with this name already exists"
-}
-
 export async function prepareNpxLaunch(directory: string): Promise<PreparedNpxLaunch | undefined> {
   prompts.intro("Agent Swarm")
 
-  const project = await detectAgencyProject(directory)
-  const choice = await chooseLaunchChoice(project)
-  if (!choice) {
-    prompts.outro("Cancelled")
-    return
-  }
-
-  if (choice === "connect") {
-    const launch = await prepareRemoteLaunch(directory)
-    if (!launch) {
-      prompts.outro("Cancelled")
-      return
-    }
-    prompts.outro("Opening Agent Swarm")
-    return launch
-  }
-
   const targetProject =
-    choice === "project"
-      ? project
-      : await createStarterProject({
-          baseDirectory: directory,
-        })
+    (await detectAgencyProject(directory)) ??
+    (await detectAgencyProject(path.join(directory, "openswarm"))) ??
+    (await createStarterProject({
+      baseDirectory: directory,
+    }))
   if (!targetProject) {
     prompts.outro("Cancelled")
     return
@@ -414,232 +385,49 @@ export async function prepareNpxLaunch(directory: string): Promise<PreparedNpxLa
     prompts.outro("Cancelled")
     return
   }
-  prompts.outro(`Opening Agent Swarm in ${targetProject.directory}`)
+  prompts.outro("Starting up OpenSwarm")
   return launch
 }
 
-async function chooseLaunchChoice(project: AgencyProject | undefined) {
-  prompts.log.info("1. Choose how to start the terminal UI.")
-  prompts.log.info(
-    "   The launcher can use a detected project, create a starter project, or connect to an existing server.",
-  )
-
-  const result = await prompts.select<LaunchChoice>({
-    message: "How do you want to start?",
-    options: [
-      ...(project
-        ? [
-            {
-              value: "project" as const,
-              label: formatProjectLabel(project),
-            },
-          ]
-        : []),
-      {
-        value: "starter" as const,
-        label: "Create a new starter project",
-        hint: "recommended for a fresh setup",
-      },
-      {
-        value: "connect" as const,
-        label: "Connect to an existing agency",
-        hint: "local or remote Agency Swarm server",
-      },
-    ],
-  })
-  if (prompts.isCancel(result)) return
-  return result
-}
-
-async function prepareRemoteLaunch(directory: string): Promise<PreparedNpxLaunch | undefined> {
-  prompts.log.info("2. Configure the Agency Swarm server.")
-  prompts.log.info("   This path is for an agency that is already running somewhere else.")
-
-  const url = await prompts.text({
-    message: "Agency Swarm base URL",
-    placeholder: AgencySwarmAdapter.DEFAULT_BASE_URL,
-    defaultValue: AgencySwarmAdapter.DEFAULT_BASE_URL,
-    validate(value) {
-      if (!value?.trim()) return "Base URL is required"
-      try {
-        AgencySwarmAdapter.normalizeBaseURL(value)
-        return
-      } catch (error) {
-        return error instanceof Error ? error.message : "Invalid URL"
-      }
-    },
-  })
-  if (prompts.isCancel(url)) return
-
-  const tokenConfirm = await prompts.confirm({
-    message: "Does this server need a bearer token?",
-    initialValue: false,
-  })
-  if (prompts.isCancel(tokenConfirm)) return
-
-  let token: string | undefined
-  if (tokenConfirm) {
-    const entered = await prompts.password({
-      message: "Bearer token",
-      mask: "•",
-    })
-    if (prompts.isCancel(entered)) return
-    token = entered.trim() || undefined
-  }
-
-  const baseURL = AgencySwarmAdapter.normalizeBaseURL(url)
-  let selectedAgency: string | undefined
-
-  try {
-    const discovered = await AgencySwarmAdapter.discover({
-      baseURL,
-      token,
-      timeoutMs: AgencySwarmAdapter.DEFAULT_DISCOVERY_TIMEOUT_MS,
-    })
-    if (discovered.agencies.length === 1) {
-      selectedAgency = discovered.agencies[0].id
-    } else if (discovered.agencies.length > 1) {
-      const picked = await prompts.select<string>({
-        message: "Choose the agency to open",
-        options: discovered.agencies.map((agency) => ({
-          value: agency.id,
-          label: agency.id,
-          hint: agency.description || undefined,
-        })),
-      })
-      if (prompts.isCancel(picked)) return
-      selectedAgency = picked
-    }
-  } catch {
-    prompts.log.warn("Automatic discovery failed. Enter the agency id manually.")
-  }
-
-  if (!selectedAgency) {
-    const manual = await prompts.text({
-      message: "Agency id",
-      placeholder: "my-agency",
-      validate(value) {
-        if (!value?.trim()) return "Agency id is required"
-      },
-    })
-    if (prompts.isCancel(manual)) return
-    selectedAgency = manual.trim()
-  }
-
-  return {
-    directory,
-    configContent: buildAgencyConfig({
-      baseURL,
-      agency: selectedAgency,
-      token,
-    }),
-  }
-}
-
 async function createStarterProject(input: { baseDirectory: string }): Promise<AgencyProject | undefined> {
-  prompts.log.info("2. Create the starter project.")
-  prompts.log.info("   This gives the terminal UI a ready-to-run Agency Swarm project to launch.")
-
-  const repoName = await prompts.text({
-    message: "Project or repository name",
-    placeholder: "my-agency",
-    validate(value) {
-      return validateStarterName(input.baseDirectory, value)
-    },
-  })
-  if (prompts.isCancel(repoName)) return
-
-  const ghReady = await hasGitHubTemplateFlow()
-  let mode: StarterMode = "local"
-  if (ghReady) {
-    const selected = await prompts.select<StarterMode>({
-      message: "How should the starter be created?",
-      options: [
-        {
-          value: "github",
-          label: "Create a GitHub repository from the template",
-          hint: "recommended",
-        },
-        {
-          value: "local",
-          label: "Create a local folder from the template",
-          hint: "skip GitHub for now",
-        },
-      ],
-    })
-    if (prompts.isCancel(selected)) return
-    mode = selected
-  }
-
-  const name = repoName.trim()
+  const name = "openswarm"
   const targetDirectory = path.join(input.baseDirectory, name)
   if (await Filesystem.exists(targetDirectory)) {
     throw new Error(`Target directory already exists: ${targetDirectory}`)
   }
 
-  const spinner = prompts.spinner()
-  spinner.start(mode === "github" ? "Creating repository from the starter template" : "Cloning the starter template")
+  prompts.log.step(`Creating starter project in \`${name}/\``)
   try {
-    if (mode === "github") {
-      const visibility = await prompts.select<"private" | "public">({
-        message: "Repository visibility",
-        options: [
-          {
-            value: "private",
-            label: "Private",
-            hint: "recommended default",
-          },
-          {
-            value: "public",
-            label: "Public",
-          },
-        ],
-      })
-      if (prompts.isCancel(visibility)) {
-        spinner.stop("Cancelled")
-        return
-      }
-
-      const result = await runCommand(
-        ["gh", "repo", "create", name, "--template", STARTER_TEMPLATE_REPO, "--clone", `--${visibility}`],
-        {
-          cwd: input.baseDirectory,
-        },
-      )
-      if (result.code !== 0) {
-        throw new Error(result.stderr.trim() || result.stdout.trim() || "GitHub template creation failed")
-      }
-    } else {
-      const clone = await runCommand(["git", "clone", "--depth=1", STARTER_TEMPLATE_URL, targetDirectory])
-      if (clone.code !== 0) {
-        throw new Error(clone.stderr.trim() || clone.stdout.trim() || "Starter template clone failed")
-      }
-      await rm(path.join(targetDirectory, ".git"), {
-        recursive: true,
-        force: true,
-      }).catch(() => undefined)
-      await runCommand(["git", "init", "-b", "main"], { cwd: targetDirectory })
+    const clone = await runCommand(["git", "clone", "--depth=1", STARTER_TEMPLATE_URL, targetDirectory])
+    if (clone.code !== 0) {
+      throw new Error(clone.stderr.trim() || clone.stdout.trim() || "Starter template clone failed")
     }
-    spinner.stop("Starter project ready")
+    await rm(path.join(targetDirectory, ".git"), {
+      recursive: true,
+      force: true,
+    }).catch(() => undefined)
+    await runCommand(["git", "init", "-b", "main"], { cwd: targetDirectory })
+    prompts.log.step("Starter project ready")
   } catch (error) {
-    spinner.stop("Starter project setup failed")
+    prompts.log.error("Starter project setup failed")
     throw error
   }
 
   return {
     directory: targetDirectory,
-    agencyFile: path.join(targetDirectory, "agency.py"),
+    agencyFile: path.join(targetDirectory, "swarm.py"),
   }
 }
 
 export async function prepareProjectLaunch(project: AgencyProject): Promise<PreparedNpxLaunch | undefined> {
-  prompts.log.info("3. Start the Agency Swarm project.")
+  prompts.log.info("Starting the Agency Swarm project.")
   prompts.log.info(
-    "   The launcher will reuse a project `.venv`, start a local FastAPI server, and connect the terminal UI to it.",
+    "The launcher will reuse a project `.venv`, start a local FastAPI server, and connect the terminal UI to it.",
   )
 
   const python = await ensureProjectPython(project.directory)
   if (!python) return
+  await registerGlobalCommand(project.directory)
 
   const server = await startProjectServer(project.directory, python)
   return {
@@ -650,6 +438,68 @@ export async function prepareProjectLaunch(project: AgencyProject): Promise<Prep
       agency: LOCAL_AGENCY_ID,
     }),
     cleanup: server.cleanup,
+  }
+}
+
+export function buildGlobalCommandScript(input: {
+  directory: string
+  agentswarmBin: string
+  platform?: NodeJS.Platform
+}) {
+  if ((input.platform ?? process.platform) === "win32") {
+    return [
+      "@echo off",
+      `if exist "${input.directory}\\." (`,
+      `  cd /d "${input.directory}"`,
+      ") else (",
+      `  echo openswarm: remembered project directory no longer exists: ${input.directory}`,
+      "  echo openswarm: starting from the current directory instead.",
+      ")",
+      "set AGENTSWARM_LAUNCHER=1",
+      `"${input.agentswarmBin}" %*`,
+      "",
+    ].join("\r\n")
+  }
+
+  return [
+    "#!/bin/sh",
+    `if [ -d "${input.directory}" ]; then`,
+    `  cd "${input.directory}" || exit $?`,
+    "else",
+    `  echo "openswarm: remembered project directory no longer exists: ${input.directory}" >&2`,
+    '  echo "openswarm: starting from the current directory instead." >&2',
+    "fi",
+    "export AGENTSWARM_LAUNCHER=1",
+    `exec "${input.agentswarmBin}" "$@"`,
+    "",
+  ].join("\n")
+}
+
+async function registerGlobalCommand(directory: string): Promise<void> {
+  const agentswarmBin = process.env.AGENTSWARM_BIN_PATH ?? process.execPath
+  if (!(await Filesystem.exists(agentswarmBin))) return
+
+  const prefixResult = await runCommand(["npm", "prefix", "-g"])
+  if (prefixResult.code !== 0) return
+
+  const prefix = prefixResult.stdout.trim()
+  try {
+    if (process.platform === "win32") {
+      const cmdPath = path.join(prefix, "openswarm.cmd")
+      await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin }))
+    } else {
+      const linkPath = path.join(prefix, "bin", "openswarm")
+      try {
+        await unlink(linkPath)
+      } catch {}
+      await writeFile(linkPath, buildGlobalCommandScript({ directory, agentswarmBin }))
+      await chmod(linkPath, 0o755)
+    }
+    prompts.log.step("`openswarm` registered as a global command")
+  } catch (error) {
+    prompts.log.warn(
+      `Could not register global \`openswarm\` command: ${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 }
 
@@ -751,24 +601,28 @@ async function ensureProjectPython(directory: string) {
     }
   }
 
-  const spinner = prompts.spinner()
-  spinner.start("Creating `.venv`")
-  const created = await runCommand([...rebuildCmd, "-m", "venv", ".venv"], {
-    cwd: directory,
-  })
+  const uv = await findUv(rebuildCmd)
+  prompts.log.step("Creating `.venv`")
+  const created = uv
+    ? await runCommand([uv, "venv", ".venv", "--python", detected.executable], {
+        cwd: directory,
+      })
+    : await runCommand([...rebuildCmd, "-m", "venv", ".venv"], {
+        cwd: directory,
+      })
   if (created.code !== 0) {
-    spinner.stop("Failed to create `.venv`")
+    prompts.log.error("Failed to create `.venv`")
     throw new Error(created.stderr.trim() || created.stdout.trim() || "Virtual environment creation failed")
   }
 
-  spinner.stop("`.venv` created")
+  prompts.log.step("`.venv` created")
   const installLogFile = await tryCreateProjectCommandLogFile(directory, "launcher-rebuild", "launcher rebuild")
   prompts.log.info(
     installLogFile
       ? `Installing project dependencies. Streaming output to stderr. Full log: ${installLogFile}`
       : "Installing project dependencies. Streaming output to stderr.",
   )
-  const install = await installProjectDependencies(directory, [venvPython], {
+  const install = await installProjectDependencies(directory, [venvPython], uv, {
     logFile: installLogFile,
     timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
   })
@@ -793,12 +647,53 @@ async function ensureProjectPython(directory: string) {
     )
   }
   prompts.log.success("Python environment ready")
+
+  const nodePackage = path.join(directory, "package.json")
+  if (await Filesystem.exists(nodePackage)) {
+    prompts.log.step("Installing Node.js dependencies")
+    const npmInstall = await runCommand(["npm", "install", "--legacy-peer-deps"], { cwd: directory })
+    if (npmInstall.code !== 0) {
+      prompts.log.warn(summarizeCommandOutput(npmInstall) || "Node.js dependency install failed")
+    } else {
+      prompts.log.step("Node.js dependencies installed")
+    }
+  }
+
+  // Install Node Playwright browsers into a project-local cache so Node-based
+  // exporters can launch Chromium without requiring a manual install.
+  prompts.log.step("Installing Playwright browsers (this may take a minute)...")
+  try {
+    const browsersPath = path.join(directory, ".playwright-browsers")
+    const installNodePlaywright = await runCommand(
+      ["npx", "-y", "playwright", "install", "chromium", "chromium-headless-shell"],
+      {
+        cwd: directory,
+        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath },
+      },
+    )
+    if (installNodePlaywright.code !== 0) {
+      prompts.log.warn(
+        `Playwright (Node) install: ${installNodePlaywright.stderr.trim() || installNodePlaywright.stdout.trim()}`,
+      )
+    }
+  } catch (error) {
+    prompts.log.warn(`Playwright (Node) install skipped: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  const playwright = await runCommand([venvPython, "-m", "playwright", "install", "chromium"], { cwd: directory })
+  if (playwright.code !== 0) {
+    prompts.log.warn(summarizeCommandOutput(playwright) || "Playwright browser install failed")
+  } else {
+    prompts.log.step("Playwright browsers installed")
+  }
+
   return [venvPython]
 }
 
 async function installProjectDependencies(
   directory: string,
   python: string[],
+  uv: string | null,
   options: {
     logFile?: string
     timeoutMs: number
@@ -806,7 +701,10 @@ async function installProjectDependencies(
 ): Promise<DependencyInstallResult> {
   const requirements = path.join(directory, "requirements.txt")
   if (await Filesystem.exists(requirements)) {
-    const result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"], {
+    const cmd = uv
+      ? [uv, "pip", "install", "--python", python[0], "--upgrade", "-r", "requirements.txt"]
+      : [...python, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"]
+    const result = await runCommand(cmd, {
       cwd: directory,
       logFile: options.logFile,
       streamOutputToStderr: true,
@@ -817,7 +715,10 @@ async function installProjectDependencies(
 
   const pyproject = path.join(directory, "pyproject.toml")
   if (await Filesystem.exists(pyproject)) {
-    const result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "-e", "."], {
+    const cmd = uv
+      ? [uv, "pip", "install", "--python", python[0], "--upgrade", "-e", "."]
+      : [...python, "-m", "pip", "install", "--upgrade", "-e", "."]
+    const result = await runCommand(cmd, {
       cwd: directory,
       logFile: options.logFile,
       streamOutputToStderr: true,
@@ -826,15 +727,29 @@ async function installProjectDependencies(
     return { ...result, hadManifests: true }
   }
 
-  const result = await runCommand(
-    [...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.6"],
-    {
-      logFile: options.logFile,
-      streamOutputToStderr: true,
-      timeoutMs: options.timeoutMs,
-    },
-  )
+  const cmd = uv
+    ? [uv, "pip", "install", "--python", python[0], "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.5"]
+    : [...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]>=1.9.5"]
+  const result = await runCommand(cmd, {
+    logFile: options.logFile,
+    streamOutputToStderr: true,
+    timeoutMs: options.timeoutMs,
+  })
   return { ...result, hadManifests: false }
+}
+
+async function findUv(python: string[]): Promise<string | null> {
+  const uv = await findExistingUv()
+  if (uv) return uv
+  const install = await runCommand([...python, "-m", "pip", "install", "uv"])
+  if (install.code === 0) return "uv"
+  return null
+}
+
+async function findExistingUv(): Promise<string | null> {
+  const check = await runCommand(["uv", "--version"])
+  if (check.code === 0) return "uv"
+  return null
 }
 
 async function formatPostInstallCanaryFailure(
@@ -916,13 +831,30 @@ async function ensureLatestAgencySwarm(
   },
 ): Promise<{ pipCorrupted: boolean }> {
   try {
-    const result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]"], {
-      cwd: directory,
-      logFile: options?.logFile,
-      streamOutputToStderr: true,
-      suppressPythonTracebackStderr: true,
-      timeoutMs: options?.timeoutMs,
-    })
+    const uv = await findExistingUv()
+    let result: CommandResult
+    if (uv) {
+      result = await runCommand(
+        [uv, "pip", "install", "--python", python[0], "--upgrade", "agency-swarm[fastapi,litellm]"],
+        {
+          cwd: directory,
+          logFile: options?.logFile,
+          streamOutputToStderr: true,
+          suppressPythonTracebackStderr: true,
+          timeoutMs: options?.timeoutMs,
+        },
+      )
+    } else {
+      const pip = await runCommand([...python, "-m", "pip", "--version"], { cwd: directory })
+      if (pip.code !== 0) return
+      result = await runCommand([...python, "-m", "pip", "install", "--upgrade", "agency-swarm[fastapi,litellm]"], {
+        cwd: directory,
+        logFile: options?.logFile,
+        streamOutputToStderr: true,
+        suppressPythonTracebackStderr: true,
+        timeoutMs: options?.timeoutMs,
+      })
+    }
     if (result.timedOut) {
       prompts.log.warn(
         result.logFile
@@ -1318,11 +1250,11 @@ async function runCommand(cmd: string[], options?: RunCommandOptions): Promise<C
   })
   try {
     const proc = Bun.spawn({
-      cmd,
+      cmd: resolveCmd(cmd),
       cwd: options?.cwd,
       stdout: "pipe",
       stderr: "pipe",
-      env: options?.env ?? process.env,
+      env: commandEnv(cmd, options?.env ?? process.env),
     })
     const outputAbort = new AbortController()
     let timeout: ReturnType<typeof setTimeout> | undefined
@@ -1370,6 +1302,22 @@ async function runCommand(cmd: string[], options?: RunCommandOptions): Promise<C
       stderr: error instanceof Error ? error.message : String(error),
       logFile,
     }
+  }
+}
+
+function resolveCmd(cmd: string[]): string[] {
+  if (process.platform !== "win32") return cmd
+  const shellCmds = ["npm", "npx", "git"]
+  if (shellCmds.includes(cmd[0])) return ["cmd.exe", "/c", ...cmd]
+  return cmd
+}
+
+function commandEnv(cmd: string[], env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const commandName = path.basename(cmd[0]).toLowerCase()
+  if (commandName !== "uv" && commandName !== "uv.exe") return env
+  return {
+    ...env,
+    UV_LINK_MODE: env.UV_LINK_MODE ?? "copy",
   }
 }
 
