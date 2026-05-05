@@ -734,3 +734,92 @@ Both fire for npx-installed binaries (method = `"unknown"` because the package i
 - function DialogAddons(props: { providerID: string; onDone: () => void }) {
 + export function DialogAddons(props: { providerID: string; onDone: () => void }) {
 ```
+
+---
+
+## 21. `packages/opencode/src/agency-swarm/npx.ts` — venv import canary timeout
+
+**Problem:** The launcher runs a Python subprocess to verify `import agency_swarm` and `from agency_swarm.integrations.fastapi import run_fastapi` before continuing. Upstream caps that probe at **60 seconds** (`VENV_CANARY_TIMEOUT_MS`). On Windows, first-time imports under antivirus or a large dependency tree can exceed that limit, producing `Agency Swarm import canary timed out after 1 minute` even when the environment would eventually succeed.
+
+**Change:** Raised the cap to **triple** the upstream default (**3 minutes**) so slow-but-healthy venvs can pass.
+
+```diff
+- const VENV_CANARY_TIMEOUT_MS = 60 * 1000
++ const VENV_CANARY_TIMEOUT_MS = 3 * 60 * 1000
+```
+
+Timeout error copy still uses `formatInstallDuration(VENV_CANARY_TIMEOUT_MS)`, so user-visible messages report **3 minutes** automatically.
+
+---
+
+## 22. `packages/opencode/src/cli/cmd/tui/app.tsx` - remove `/models`
+
+**Change:** Removed the `Switch model` command entry entirely, including its `/models` slash command and `model_list` keybind registration. This keeps OpenSwarm users on the Agency Swarm provider path instead of exposing the generic OpenCode model picker.
+
+```diff
+- import { DialogModel } from "@tui/component/dialog-model"
+
+- {
+-   title: "Switch model",
+-   value: "model.list",
+-   keybind: "model_list",
+-   suggested: true,
+-   category: "Agent",
+-   slash: {
+-     name: "models",
+-   },
+-   onSelect: () => {
+-     dialog.replace(() => <DialogModel />)
+-   },
+- },
+```
+
+---
+
+## 23. `packages/opencode/src/session/agency-swarm.ts` — bounded Agency Swarm history/tool payloads
+
+**Problem:** Large Agency Swarm runs can emit very large tool outputs while creating slides, documents, or both. The TUI stored those raw outputs in local `AgencySwarmHistory` and replayed them back as `chat_history` on later turns. Over time the bridge payload could grow large enough that subsequent tool streams ended without matching output events, producing repeated `Tool stream ended before output was received` errors and eventual operation timeouts.
+
+**Change:** Added size caps for Agency Swarm tool outputs and replayed message text:
+
+```diff
++ const MAX_UI_TOOL_OUTPUT_CHARS = 60_000
++ const MAX_HISTORY_TOOL_OUTPUT_CHARS = 20_000
++ const MAX_TRANSPORT_TOOL_OUTPUT_CHARS = 12_000
++ const MAX_TRANSPORT_MESSAGE_TEXT_CHARS = 80_000
+```
+
+- Current-turn tool output shown/stored in the TUI is bounded.
+- Stored Agency Swarm history truncates large tool outputs before writing to local storage.
+- Transport `chat_history` truncates large tool outputs and message text before sending to the FastAPI bridge.
+- Call IDs and message structure are preserved so the stream lifecycle can still complete.
+
+## 24. `packages/opencode/src/agency-swarm/npx.ts` — disable fixed provider timeout for local bridge
+
+**Problem:** OpenSwarm file-generation runs can legitimately keep the local Agency Swarm stream open for longer than generic LLM request limits.
+
+**Change:** The generated Agency Swarm provider config now sets `timeout: false` so long-running local bridge streams are not cut off by the generic provider request timeout.
+
+```diff
+  discoveryTimeoutMs: 2000,
++ timeout: false,
+  clientConfig: { model: "gpt-5.4" },
+```
+
+## 25. `packages/opencode/src/session/agency-swarm.ts` - persist cancel recovery messages
+
+**Problem:** The Agency Swarm cancel endpoint can return partial `new_messages` generated before a timeout or user abort. The TUI bridge ignored those messages, so the next `continue` request could be built from stale `AgencySwarmHistory` and lose user overrides captured during the failed run. ESC cancellation also started the cancel request asynchronously, which allowed queued follow-up prompts to start before cancel recovery messages were persisted.
+
+**Change:** Cancel responses now persist returned `new_messages` through the same history-normalization path used by normal stream completion. The stream waits for the in-flight cancel request before finishing, so queued follow-up prompts read the recovered backend history instead of stale local history.
+
+## 26. `packages/opencode/src/session/agency-swarm.ts` - rebuild streamed tool history after errored turns
+
+**Problem:** Queued prompts can be saved locally while an Agency Swarm stream is still running. Tool calls and the queued user's previous instruction turn are visible in the TUI, but the backend may not have emitted final `new_messages` yet, so stored Agency Swarm history can still be stale. A queued follow-up can then miss the user's override message and visible tool calls.
+
+**Change:** When stored `AgencySwarmHistory` is empty, errored, or missing prior local user messages, the bridge rebuilds request history from local session messages. The rebuild accepts local user messages even though they retain the user-selected model provider, while still requiring prior assistant messages to come from Agency Swarm. It translates local TUI tool parts into Agency Swarm-style `function_call` and `function_call_output` items, preserving visible tool state for the next turn. Rebuilt interrupted tool calls receive an explicit interrupted output so provider history never contains an orphaned function call. Rebuilt tool items are stripped to provider-accepted fields for transport, while rebuilt history is only persisted for empty-history recovery to avoid duplicate stored turns.
+
+## 27. `packages/opencode/src/agency-swarm/product.ts` - use OpenSwarm command in UI copy
+
+**Problem:** The TUI startup/exit guidance used the product command constant to render resume instructions, but the constant still pointed at `agentswarm`. On Windows this produced `agentswarm -s <session_id>`, which is not the registered command for this repo.
+
+**Change:** The product command is now `openswarm`, matching the global shim registered by the launcher and the command users can actually run.

@@ -75,7 +75,7 @@ interface ServerStderrCollector {
 const VENV_CANARY_SCRIPT = ["import agency_swarm", "from agency_swarm.integrations.fastapi import run_fastapi"].join(
   "\n",
 )
-const VENV_CANARY_TIMEOUT_MS = 60 * 1000
+const VENV_CANARY_TIMEOUT_MS = 12 * 1000
 const SERVER_STDERR_COLLECT_TIMEOUT_MS = 1000
 const REBUILD_INSTALL_TIMEOUT_MS = 10 * 60 * 1000
 const PROCESS_KILL_GRACE_MS = 5000
@@ -335,6 +335,7 @@ export function buildAgencyConfig(input: { baseURL: string; agency: string; toke
           baseURL: input.baseURL,
           agency: input.agency,
           discoveryTimeoutMs: 2000,
+          timeout: false,
           clientConfig: { model: "gpt-5.4" },
           ...(input.token ? { token: input.token } : {}),
         },
