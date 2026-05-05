@@ -75,7 +75,8 @@ interface ServerStderrCollector {
 const VENV_CANARY_SCRIPT = ["import agency_swarm", "from agency_swarm.integrations.fastapi import run_fastapi"].join(
   "\n",
 )
-const VENV_CANARY_TIMEOUT_MS = 12 * 1000
+const VENV_CANARY_TIMEOUT_MS = 3 * 60 * 1000
+const SERVER_START_TIMEOUT_MS = 90 * 1000
 const SERVER_STDERR_COLLECT_TIMEOUT_MS = 1000
 const REBUILD_INSTALL_TIMEOUT_MS = 10 * 60 * 1000
 const PROCESS_KILL_GRACE_MS = 5000
@@ -504,8 +505,10 @@ async function registerGlobalCommand(directory: string): Promise<void> {
 
 async function ensureProjectPython(directory: string) {
   const venvPython = getVenvPythonPath(directory)
+  const venvDir = path.resolve(path.join(directory, ".venv"))
   let selfHealing = false
   let corruptedVenv = false
+  const hasVenvPath = await Filesystem.exists(venvDir)
   const hasVenv = await Filesystem.exists(venvPython)
   if (hasVenv) {
     // Probing the venv's interpreter can throw if the base Python was removed
@@ -528,10 +531,11 @@ async function ensureProjectPython(directory: string) {
           : "Refreshing project dependencies. Streaming output to stderr.",
       )
       try {
-        await ensureLatestAgencySwarm(directory, [venvPython], {
+        const refresh = await ensureLatestAgencySwarm(directory, [venvPython], {
           logFile: refreshLogFile,
           timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
         })
+        if (refresh.pipCorrupted) corruptedVenv = true
       } catch {
         corruptedVenv = true
       }
@@ -553,9 +557,10 @@ async function ensureProjectPython(directory: string) {
         corruptedVenv = true
       }
     }
+  } else if (hasVenvPath) {
+    corruptedVenv = true
   }
 
-  const venvDir = path.resolve(path.join(directory, ".venv"))
   const detected = await findPythonExecutable(corruptedVenv ? venvDir : undefined)
   if (!detected) {
     if (corruptedVenv) {
@@ -572,8 +577,8 @@ async function ensureProjectPython(directory: string) {
   prompts.log.info(`Detected Python: ${formatPython(detected, rebuildCmd)}`)
 
   if (corruptedVenv) {
-    prompts.log.warn("Project `.venv` is missing module sources (corrupted install). Rebuilding...")
-    await rm(path.join(directory, ".venv"), { recursive: true, force: true })
+    prompts.log.warn("Project `.venv` is incomplete or corrupted. Rebuilding...")
+    await rm(venvDir, { recursive: true, force: true })
     selfHealing = true
   }
 
@@ -637,7 +642,9 @@ async function ensureProjectPython(directory: string) {
     throw new Error(await formatCanaryTimeoutFailure(directory, canary.stderr))
   }
   if (!canary.healthy) {
-    throw new Error(await formatPostInstallCanaryFailure(directory, install.hadManifests, canary.stderr))
+    throw new Error(
+      await formatPostInstallCanaryFailure(directory, install.hadManifests, canary.stderr, install.logFile),
+    )
   }
   prompts.log.success("Python environment ready")
 
@@ -745,22 +752,23 @@ async function findExistingUv(): Promise<string | null> {
   return null
 }
 
-async function formatPostInstallCanaryFailure(directory: string, hadManifests: boolean, stderr: string) {
+async function formatPostInstallCanaryFailure(
+  directory: string,
+  hadManifests: boolean,
+  stderr: string,
+  logFile?: string,
+) {
   const summary = summarizeBridgeStderr(stderr)
   const shadowingHint = await formatShadowingHint(directory)
+  const logHint = logFile ? ` Check the log file at ${logFile}.` : ""
+  const detail = summary ? ` Details: ${summary}` : ""
   if (isImportLikeCanaryFailure(stderr)) {
     if (hadManifests) {
-      return summary
-        ? `Canary import failed. Check requirements.txt/pyproject.toml for agency-swarm version compatibility.${shadowingHint} Canary stderr: ${summary}`
-        : `Canary import failed. Check requirements.txt/pyproject.toml for agency-swarm version compatibility.${shadowingHint}`
+      return `The launcher recreated the local Python environment, but it still could not import required Agency Swarm packages. Check requirements.txt/pyproject.toml for agency-swarm version compatibility.${shadowingHint}${logHint}${detail}`
     }
-    return summary
-      ? `Canary import failed on fallback install. Inspect the stderr below and check for project-local fastapi.py/agency_swarm.py that may shadow installed packages.${shadowingHint} Canary stderr: ${summary}`
-      : `Canary import failed on fallback install. Inspect the stderr below and check for project-local fastapi.py/agency_swarm.py that may shadow installed packages.${shadowingHint}`
+    return `The launcher recreated the local Python environment, but it still could not import required Agency Swarm packages. Check for project-local fastapi.py/agency_swarm.py files that may shadow installed packages.${shadowingHint}${logHint}${detail}`
   }
-  return summary
-    ? `Project \`.venv\` rebuilt successfully, but the Agency Swarm import canary still failed.${shadowingHint} Canary stderr: ${summary}`
-    : `Project \`.venv\` rebuilt successfully, but the Agency Swarm import canary still failed.${shadowingHint}`
+  return `The launcher recreated the local Python environment, but it still could not repair it.${shadowingHint}${logHint}${detail}`
 }
 
 async function formatCanaryTimeoutFailure(directory: string, stderr: string) {
@@ -821,7 +829,7 @@ async function ensureLatestAgencySwarm(
     logFile?: string
     timeoutMs?: number
   },
-) {
+): Promise<{ pipCorrupted: boolean }> {
   try {
     const uv = await findExistingUv()
     let result: CommandResult
@@ -853,7 +861,7 @@ async function ensureLatestAgencySwarm(
           ? `Timed out while refreshing agency-swarm after ${formatInstallDuration(options?.timeoutMs ?? REBUILD_INSTALL_TIMEOUT_MS)}. Check the log file at ${result.logFile}.`
           : `Timed out while refreshing agency-swarm after ${formatInstallDuration(options?.timeoutMs ?? REBUILD_INSTALL_TIMEOUT_MS)}.`,
       )
-      return
+      return { pipCorrupted: false }
     }
     if (result.code !== 0) {
       const summary = summarizeCommandOutput(result)
@@ -864,12 +872,14 @@ async function ensureLatestAgencySwarm(
             } The current venv package will be used as-is.`
           : "Could not refresh agency-swarm to the latest version. The current venv package will be used as-is.",
       )
+      return { pipCorrupted: isPipCorruptionFailure(`${result.stderr}\n${result.stdout}`) }
     }
   } catch {
     prompts.log.warn(
       "Could not refresh agency-swarm to the latest version. The current venv package will be used as-is.",
     )
   }
+  return { pipCorrupted: false }
 }
 
 async function createProjectCommandLogFile(directory: string, stem: string) {
@@ -977,7 +987,7 @@ async function waitForServer(input: {
   child: ReturnType<typeof Bun.spawn>
   stderr: ServerStderrCollector
 }) {
-  const deadline = Date.now() + 120000
+  const deadline = Date.now() + SERVER_START_TIMEOUT_MS
   const metadataURL = `${input.baseURL}/${LOCAL_AGENCY_ID}/get_metadata`
   while (Date.now() < deadline) {
     const exited = await Promise.race([input.child.exited.then((code: number) => code), sleep(200).then(() => null)])
@@ -1001,11 +1011,14 @@ async function waitForServer(input: {
 
   input.child.kill()
   const stderr = await input.stderr.read(SERVER_STDERR_COLLECT_TIMEOUT_MS)
-  const summary = summarizeBridgeStderr(stderr)
+  const summary = summarizeActionableBridgeStderr(stderr)
+  const warningSummary = summary ? "" : summarizeBridgeStderr(stderr)
   throw new Error(
     summary
-      ? `Timed out waiting for the Agency Swarm server to start. Last bridge output: ${summary}`
-      : "Timed out waiting for the Agency Swarm server to start",
+      ? `Timed out waiting for the Agency Swarm server to start after ${formatInstallDuration(SERVER_START_TIMEOUT_MS)}. Last bridge output: ${summary}`
+      : warningSummary
+        ? `Timed out waiting for the Agency Swarm server to start after ${formatInstallDuration(SERVER_START_TIMEOUT_MS)}. Bridge output only contained non-fatal startup warnings: ${warningSummary}`
+        : `Timed out waiting for the Agency Swarm server to start after ${formatInstallDuration(SERVER_START_TIMEOUT_MS)}`,
   )
 }
 
@@ -1060,11 +1073,24 @@ function createServerStderrCollector(
 }
 
 export function summarizeBridgeStderr(stderr: string): string {
-  const trimmed = stderr.trim()
-  if (!trimmed) return ""
-  const lines = trimmed.split(/\r?\n/).filter((line) => line.trim().length > 0)
+  return summarizeBridgeStderrLines(splitStderrLines(stderr))
+}
+
+function summarizeActionableBridgeStderr(stderr: string): string {
+  return summarizeBridgeStderrLines(splitStderrLines(stderr).filter((line) => !isNonFatalBridgeStartupWarning(line)))
+}
+
+function summarizeBridgeStderrLines(lines: string[]): string {
+  if (lines.length === 0) return ""
   const tail = lines.slice(-5).join(" | ")
   return tail.length > 500 ? `${tail.slice(0, 500)}...` : tail
+}
+
+function splitStderrLines(stderr: string) {
+  return stderr
+    .trim()
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
 }
 
 function summarizeInstallerOutput(output: string) {
@@ -1085,6 +1111,28 @@ function summarizePythonTraceback(output: string) {
 function isPythonTracebackFinalExceptionLine(line: string) {
   if (/^\s/.test(line)) return false
   return /^[A-Za-z_][\w.]*:(?:\s|$)/.test(line.trimEnd())
+}
+
+function isPipCorruptionFailure(output: string) {
+  return (
+    /\bModuleNotFoundError:\s+No module named ['"]pip(?:['"]|\.)/.test(output) ||
+    /\bImportError:\s+cannot import name .* from ['"]pip/.test(output)
+  )
+}
+
+function isNonFatalBridgeStartupWarning(line: string) {
+  const trimmed = line.trim()
+  return (
+    /^Files folder '.+' does not exist\. Skipping\.\.\.$/.test(trimmed) ||
+    trimmed === "App token is not set. Authentication will be disabled."
+  )
+}
+
+async function hasGitHubTemplateFlow() {
+  const gh = await runCommand(["gh", "--version"])
+  if (gh.code !== 0) return false
+  const auth = await runCommand(["gh", "auth", "status"])
+  return auth.code === 0
 }
 
 async function findPythonExecutable(excludeUnder?: string) {
