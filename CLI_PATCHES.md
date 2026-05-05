@@ -829,3 +829,9 @@ Timeout error copy still uses `formatInstallDuration(VENV_CANARY_TIMEOUT_MS)`, s
 **Problem:** Existing OpenSwarm configs can declare the `agency-swarm` provider without the newer generated `timeout: false` option. In that case long slide/document generation runs can still be cut off by the generic provider request timeout, leaving visible tool calls without matching outputs and surfacing `Tool stream ended before output was received`.
 
 **Change:** The built-in Agency Swarm provider now defaults to `timeout: false`. Generated configs still include the explicit option, but older configs inherit the no-timeout default instead of timing out during long local bridge streams.
+
+## 29. `packages/opencode/src/session/agency-swarm.ts` - rewrite hosted-tool preservation system messages for Codex transport
+
+**Problem:** Agency Swarm persists hosted tool results for `web_search` and `file_search` as synthetic `role: "system"` messages with `message_origin` values `web_search_preservation` and `file_search_preservation`. Codex/browser-auth model transport rejects those replayed history items with `System messages are not allowed`, even though they are valid Agency Swarm internal preservation messages.
+
+**Change:** When the resolved client config targets the Codex API base URL, the Agency Swarm bridge rewrites only those known hosted-tool preservation messages from `role: "system"` to `role: "developer"` in outbound `chat_history` transport. Stored history remains untouched, non-Codex transports keep the original role, and other Agency Swarm system/control messages are preserved.

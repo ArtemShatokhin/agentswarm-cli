@@ -56,6 +56,7 @@ export namespace SessionAgencySwarm {
   const MAX_HISTORY_TOOL_OUTPUT_CHARS = 20_000
   const MAX_TRANSPORT_TOOL_OUTPUT_CHARS = 12_000
   const MAX_TRANSPORT_MESSAGE_TEXT_CHARS = 80_000
+  const HOSTED_TOOL_PRESERVATION_ORIGINS = new Set(["file_search_preservation", "web_search_preservation"])
 
   export type RuntimeOptions = {
     baseURL: string
@@ -1659,7 +1660,8 @@ export namespace SessionAgencySwarm {
         !!rebuiltHistoryFromMessages &&
         !!sessionMessages &&
         hasPriorFileParts(sessionMessages, input.userMessage.info.id)
-      const sanitizedChatHistory = sanitizeAgencyHistoryForTransport(chatHistory)
+      const codexTransport = isCodexClientConfig(clientConfig)
+      const sanitizedChatHistory = sanitizeAgencyHistoryForTransport(chatHistory, { codexTransport })
       const replayOnlyOutgoing = replayStoredAttachmentsInOutgoingMessage(outgoingMessage, sanitizedChatHistory)
       const attachmentMessage =
         hasCurrentFileAttachments ||
@@ -1702,7 +1704,7 @@ export namespace SessionAgencySwarm {
       if (persistRebuiltHistoryFromMessages && rebuiltHistoryFromMessages) {
         await AgencySwarmHistory.appendMessages(scope, rebuiltHistoryFromMessages)
       }
-      const transportChatHistory = sanitizeAgencyHistoryForTransport(effectiveChatHistory)
+      const transportChatHistory = sanitizeAgencyHistoryForTransport(effectiveChatHistory, { codexTransport })
       let requestMessage: AgencyMessageInput = outgoingMessage
       let fileURLs: Record<string, string> | undefined
       if (structuredAttachmentsSupported) {
@@ -2600,7 +2602,15 @@ export namespace SessionAgencySwarm {
     return msgs.some((msg) => msg.info.id !== currentID && hasFileParts(msg))
   }
 
-  function sanitizeAgencyHistoryForTransport(history: Array<Record<string, unknown>>) {
+  function isCodexClientConfig(config: Record<string, unknown> | undefined) {
+    const baseURL = readConfiguredBaseURL(config)
+    return !!baseURL && isCodexAPIBaseURL(baseURL)
+  }
+
+  function sanitizeAgencyHistoryForTransport(
+    history: Array<Record<string, unknown>>,
+    options: { codexTransport?: boolean } = {},
+  ) {
     return history.flatMap((item) => {
       const type = asString(item["type"])
       if (type === "handoff_output_item" || type === "item_reference") return []
@@ -2611,8 +2621,18 @@ export namespace SessionAgencySwarm {
       ) {
         return []
       }
-      return [normalizeAgencyHistoryItem(stripOpenAIResponseItemID(item), "transport")]
+      const transportItem =
+        options.codexTransport && isHostedToolPreservationSystemMessage(item) ? { ...item, role: "developer" } : item
+      return [normalizeAgencyHistoryItem(stripOpenAIResponseItemID(transportItem), "transport")]
     })
+  }
+
+  function isHostedToolPreservationSystemMessage(item: Record<string, unknown>) {
+    return (
+      asString(item["type"]) === "message" &&
+      asString(item["role"]) === "system" &&
+      HOSTED_TOOL_PRESERVATION_ORIGINS.has(asString(item["message_origin"]) || "")
+    )
   }
 
   function normalizeAgencyHistoryForStorage(input: unknown) {
