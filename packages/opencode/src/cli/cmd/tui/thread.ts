@@ -267,13 +267,14 @@ export const TuiThreadCommand = cmd({
         return
       }
 
-      setTimeout(() => {
-        client.call("checkUpgrade", { directory: cwd }).catch(() => {})
-      }, 1000).unref?.()
-
       try {
         await tui({
           url: transport.url,
+          onReady() {
+            setTimeout(() => {
+              client.call("checkUpgrade", { directory: cwd }).catch(() => {})
+            }, 1000).unref?.()
+          },
           async onSnapshot() {
             const tui = writeHeapSnapshot("tui.heapsnapshot")
             const server = await client.call("snapshot", undefined)

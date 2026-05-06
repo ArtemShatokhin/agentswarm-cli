@@ -3,6 +3,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } fr
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+import { readFile } from "fs/promises"
 import path from "path"
 import z from "zod"
 import { BusEvent } from "@/bus/bus-event"
@@ -70,7 +71,25 @@ export class UpgradeFailedError extends Schema.TaggedErrorClass<UpgradeFailedErr
 }) {}
 
 // Response schemas for external version APIs
-const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
+const NpmPackage = Schema.Struct({
+  "dist-tags": Schema.Struct({
+    latest: Schema.String,
+  }),
+})
+
+async function readOpenSwarmPackageVersion(openswarmBinPath?: string) {
+  if (!openswarmBinPath) return undefined
+  try {
+    const packageJSON = JSON.parse(await readFile(path.join(path.dirname(openswarmBinPath), "..", "package.json"), "utf8"))
+    return typeof packageJSON.version === "string" ? packageJSON.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function npmRegistryPackageURL(packageName: string) {
+  return `https://registry.npmjs.org/${encodeURIComponent(packageName).replace("%2F", "%2f")}`
+}
 
 export interface Interface {
   readonly info: () => Effect.Effect<Info>
@@ -89,6 +108,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
       const httpOk = HttpClient.filterStatusOk(withTransientReadRetry(http))
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
       const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
+      const npmInstallGlobal = (target: string) =>
+        [npmCmd, "install", "-g", "--force", `${InstallationDistribution.packageName}@${target}`]
 
       const text = Effect.fnUntraced(
         function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
@@ -125,32 +146,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
         Effect.catch(() => Effect.succeed({ code: ChildProcessSpawner.ExitCode(1), stdout: "", stderr: "" })),
       )
 
-      const upgradeCurl = Effect.fnUntraced(
-        function* (target: string) {
-          const response = yield* httpOk.execute(HttpClientRequest.get(InstallationDistribution.installURL))
-          const body = yield* response.text
-          const bodyBytes = new TextEncoder().encode(body)
-          const proc = ChildProcess.make("bash", [], {
-            stdin: Stream.make(bodyBytes),
-            env: { VERSION: target },
-            extendEnv: true,
-          })
-          const handle = yield* spawner.spawn(proc)
-          const [stdout, stderr] = yield* Effect.all(
-            [Stream.mkString(Stream.decodeText(handle.stdout)), Stream.mkString(Stream.decodeText(handle.stderr))],
-            { concurrency: 2 },
-          )
-          const code = yield* handle.exitCode
-          return { code, stdout, stderr }
-        },
-        Effect.scoped,
-        Effect.orDie,
-      )
-
       const result: Interface = {
         info: Effect.fn("Installation.info")(function* () {
+          const installedOpenSwarm = yield* Effect.promise(() =>
+            readOpenSwarmPackageVersion(process.env.OPENSWARM_BIN_PATH),
+          )
           return {
-            version: InstallationVersion,
+            version: installedOpenSwarm ?? InstallationVersion,
             latest: yield* result.latest(),
           }
         }),
@@ -188,21 +190,21 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
         }),
         latest: Effect.fn("Installation.latest")(function* (_installMethod?: Method) {
           const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              `https://api.github.com/repos/${InstallationDistribution.releaseRepo}/releases/latest`,
-            ).pipe(HttpClientRequest.acceptJson),
+            HttpClientRequest.get(npmRegistryPackageURL(InstallationDistribution.packageName)).pipe(
+              HttpClientRequest.acceptJson,
+            ),
           )
-          const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
-          return data.tag_name.replace(/^v/, "")
+          const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
+          return data["dist-tags"].latest
         }, Effect.orDie),
         upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
           let upgradeResult: { code: ChildProcessSpawner.ExitCode; stdout: string; stderr: string } | undefined
           switch (m) {
             case "curl":
-              upgradeResult = yield* upgradeCurl(target)
+              upgradeResult = yield* run(npmInstallGlobal(target))
               break
             case "npm":
-              upgradeResult = yield* run([npmCmd, "install", "-g", `${InstallationDistribution.packageName}@${target}`])
+              upgradeResult = yield* run(npmInstallGlobal(target))
               break
             case "pnpm":
               upgradeResult = yield* run(["pnpm", "install", "-g", `${InstallationDistribution.packageName}@${target}`])
@@ -232,7 +234,7 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
               break
             default:
               // npx / unknown install — fall back to global npm install
-              upgradeResult = yield* run([npmCmd, "install", "-g", `${InstallationDistribution.packageName}@${target}`])
+              upgradeResult = yield* run(npmInstallGlobal(target))
           }
           if (!upgradeResult || upgradeResult.code !== 0) {
             const stderr = upgradeResult?.stderr || ""

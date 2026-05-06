@@ -444,9 +444,13 @@ export async function prepareProjectLaunch(project: AgencyProject): Promise<Prep
 export function buildGlobalCommandScript(input: {
   directory: string
   agentswarmBin: string
+  nodeBin?: string
   platform?: NodeJS.Platform
 }) {
   if ((input.platform ?? process.platform) === "win32") {
+    const command = input.nodeBin
+      ? `"${input.nodeBin}" "${input.agentswarmBin}" %*`
+      : `"${input.agentswarmBin}" %*`
     return [
       "@echo off",
       `if exist "${input.directory}\\." (`,
@@ -456,11 +460,14 @@ export function buildGlobalCommandScript(input: {
       "  echo openswarm: starting from the current directory instead.",
       ")",
       "set AGENTSWARM_LAUNCHER=1",
-      `"${input.agentswarmBin}" %*`,
+      command,
       "",
     ].join("\r\n")
   }
 
+  const command = input.nodeBin
+    ? `exec "${input.nodeBin}" "${input.agentswarmBin}" "$@"`
+    : `exec "${input.agentswarmBin}" "$@"`
   return [
     "#!/bin/sh",
     `if [ -d "${input.directory}" ]; then`,
@@ -470,14 +477,40 @@ export function buildGlobalCommandScript(input: {
     '  echo "openswarm: starting from the current directory instead." >&2',
     "fi",
     "export AGENTSWARM_LAUNCHER=1",
-    `exec "${input.agentswarmBin}" "$@"`,
+    command,
+    "",
+  ].join("\n")
+}
+
+export function buildGlobalPowerShellScript(input: {
+  directory: string
+  agentswarmBin: string
+  nodeBin?: string
+}) {
+  const command = input.nodeBin
+    ? `& "${input.nodeBin}" "${input.agentswarmBin}" @args`
+    : `& "${input.agentswarmBin}" @args`
+  return [
+    "#!/usr/bin/env pwsh",
+    `if (Test-Path "${input.directory}\\.") {`,
+    `  Set-Location "${input.directory}"`,
+    "} else {",
+    `  Write-Host "openswarm: remembered project directory no longer exists: ${input.directory}"`,
+    '  Write-Host "openswarm: starting from the current directory instead."',
+    "}",
+    '$env:AGENTSWARM_LAUNCHER = "1"',
+    command,
+    "exit $LASTEXITCODE",
     "",
   ].join("\n")
 }
 
 async function registerGlobalCommand(directory: string): Promise<void> {
-  const agentswarmBin = process.env.AGENTSWARM_BIN_PATH ?? process.execPath
+  const openswarmBin = process.env.OPENSWARM_BIN_PATH
+  const agentswarmBin = openswarmBin ?? process.env.AGENTSWARM_BIN_PATH ?? process.execPath
+  const nodeBin = openswarmBin ? process.env.OPENSWARM_NODE_PATH : undefined
   if (!(await Filesystem.exists(agentswarmBin))) return
+  if (openswarmBin && (!nodeBin || !(await Filesystem.exists(nodeBin)))) return
 
   const prefixResult = await runCommand(["npm", "prefix", "-g"])
   if (prefixResult.code !== 0) return
@@ -486,13 +519,15 @@ async function registerGlobalCommand(directory: string): Promise<void> {
   try {
     if (process.platform === "win32") {
       const cmdPath = path.join(prefix, "openswarm.cmd")
-      await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin }))
+      const ps1Path = path.join(prefix, "openswarm.ps1")
+      await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin, nodeBin }))
+      await writeFile(ps1Path, buildGlobalPowerShellScript({ directory, agentswarmBin, nodeBin }))
     } else {
       const linkPath = path.join(prefix, "bin", "openswarm")
       try {
         await unlink(linkPath)
       } catch {}
-      await writeFile(linkPath, buildGlobalCommandScript({ directory, agentswarmBin }))
+      await writeFile(linkPath, buildGlobalCommandScript({ directory, agentswarmBin, nodeBin }))
       await chmod(linkPath, 0o755)
     }
     prompts.log.step("`openswarm` registered as a global command")

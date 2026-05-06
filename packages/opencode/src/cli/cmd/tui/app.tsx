@@ -113,6 +113,7 @@ export function tui(input: {
   args: Args
   config: TuiConfig.Info
   onSnapshot?: () => Promise<string[]>
+  onReady?: () => void
   directory?: string
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
@@ -178,7 +179,7 @@ export function tui(input: {
                                             <PromptHistoryProvider>
                                               <PromptRefProvider>
                                                 <EditorContextProvider>
-                                                  <App onSnapshot={input.onSnapshot} />
+                                                  <App onSnapshot={input.onSnapshot} onReady={input.onReady} />
                                                 </EditorContextProvider>
                                               </PromptRefProvider>
                                             </PromptHistoryProvider>
@@ -205,7 +206,7 @@ export function tui(input: {
   })
 }
 
-function App(props: { onSnapshot?: () => Promise<string[]> }) {
+function App(props: { onSnapshot?: () => Promise<string[]>; onReady?: () => void }) {
   const tuiConfig = useTuiConfig()
   const route = useRoute()
   const dimensions = useTerminalDimensions()
@@ -245,6 +246,10 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     theme: themeState,
     toast,
     renderer,
+  })
+
+  onMount(() => {
+    props.onReady?.()
   })
   const [pluginsReady, setPluginsReady] = createSignal(false)
   const themePaintReady = createMemo(() => process.env.TERM_PROGRAM !== "Apple_Terminal" || themeState.paintReady)
@@ -916,8 +921,9 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
 
   event.on("installation.update-available", async (evt) => {
     const version = evt.properties.version
+    const skippedVersionKey = "openswarm_skipped_version"
 
-    const skipped = kv.get("skipped_version")
+    const skipped = kv.get(skippedVersionKey)
     if (skipped && !semver.gt(version, skipped)) return
 
     const choice = await DialogConfirm.show(
@@ -928,7 +934,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     )
 
     if (choice === false) {
-      kv.set("skipped_version", version)
+      kv.set(skippedVersionKey, version)
       return
     }
 
@@ -943,10 +949,14 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     const result = await sdk.client.global.upgrade({ target: version })
 
     if (result.error || !result.data?.success) {
+      const error = result.error as { message?: string } | undefined
+      const data = result.data as { success?: boolean; error?: string } | undefined
+      const message =
+        error?.message ?? data?.error ?? "Update failed. Check the Agent Swarm log for details."
       toast.show({
         variant: "error",
         title: "Update Failed",
-        message: "Update failed",
+        message,
         duration: 10000,
       })
       return
@@ -955,10 +965,8 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     await DialogAlert.show(
       dialog,
       "Update Complete",
-      `Successfully updated to ${AgencyProduct.name} v${result.data.version}. Please restart the application.`,
+      `Successfully installed ${AgencyProduct.name} v${result.data.version}. The new UI version will be used the next time you launch OpenSwarm.`,
     )
-
-    void exit()
   })
 
   const plugin = createMemo(() => {

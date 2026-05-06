@@ -835,3 +835,84 @@ Timeout error copy still uses `formatInstallDuration(VENV_CANARY_TIMEOUT_MS)`, s
 **Problem:** Agency Swarm persists hosted tool results for `web_search` and `file_search` as synthetic `role: "system"` messages with `message_origin` values `web_search_preservation` and `file_search_preservation`. Codex/browser-auth model transport rejects those replayed history items with `System messages are not allowed`, even though they are valid Agency Swarm internal preservation messages.
 
 **Change:** When the resolved client config targets the Codex API base URL, the Agency Swarm bridge rewrites only those known hosted-tool preservation messages from `role: "system"` to `role: "developer"` in outbound `chat_history` transport. Stored history remains untouched, non-Codex transports keep the original role, and other Agency Swarm system/control messages are preserved.
+
+## 30. `packages/opencode/src/installation/index.ts` + `packages/opencode/src/cli/upgrade.ts` - prompted OpenSwarm npm updates
+
+**Problem:** The previous OpenSwarm update experiment compared against GitHub release versions and tried to update the running TUI binary directly. On Windows the running `.exe` is locked, so direct replacement fails. It also allowed patch updates to auto-install without an explicit user confirmation, which is not desired for OpenSwarm.
+
+**Change:** The updater now treats `@vrsen/openswarm` on npm as the update unit:
+
+- `Installation.info()` reads the installed OpenSwarm npm package version from `OPENSWARM_BIN_PATH`.
+- `Installation.latest()` reads the `latest` dist-tag from the npm registry for `@vrsen/openswarm`.
+- `Installation.upgrade()` installs with the package manager path, using `npm install -g --force @vrsen/openswarm@<target>` for npm/curl/unknown installs. `--force` is needed because the launcher can already own the global `openswarm.cmd` shim and npm otherwise fails with `EEXIST`.
+- `cli/upgrade.ts` no longer auto-installs patch updates. Any newer OpenSwarm package version publishes `installation.update-available`, so installation only happens after the user accepts the UI prompt.
+
+```diff
+- if (InstallationVersion === latest) return
+- if (config.autoupdate === "notify" || kind !== "patch") publish UpdateAvailable
+- await svc.upgrade(method, latest)
++ const current = info?.version ?? InstallationVersion
++ if (current === latest) return
++ await Bus.publish(Installation.Event.UpdateAvailable, { version: latest })
+```
+
+## 31. `packages/opencode/src/cli/cmd/tui/app.tsx` + `thread.ts` - reliable update prompt UX
+
+**Problem:** The update event could be published before the TUI subscribed to events, causing the prompt to be missed. The generic skip key also conflicted with upstream AgentSwarm skipped versions. After a successful install the UI forced an immediate exit, which made the update feel abrupt even though the new UI is only used on the next launch.
+
+**Change:**
+
+- `tui()` accepts an `onReady` callback, and `thread.ts` calls `checkUpgrade` only after the TUI has mounted.
+- The skip key is now OpenSwarm-specific: `openswarm_skipped_version`.
+- Update failures show the returned install error when available instead of a generic `Update failed`.
+- The success dialog says the new UI is used on the next OpenSwarm launch.
+- The UI no longer calls `exit()` after the user acknowledges the success dialog; users can keep working and restart naturally.
+
+```diff
+- setTimeout(() => client.call("checkUpgrade", ...), 1000)
++ tui({ onReady() { setTimeout(() => client.call("checkUpgrade", ...), 1000) } })
+
+- kv.get("skipped_version")
++ kv.get("openswarm_skipped_version")
+
+- Successfully updated ... Please restart the application.
+- void exit()
++ Successfully installed ... The new UI version will be used the next time you launch OpenSwarm.
+```
+
+## 32. `packages/opencode/src/index.ts` - one-time migration guard uses active DB path
+
+**Problem:** The one-time JSON-to-SQLite migration banner checked only `opencode.db`, but non-release/dev channels use channel-specific DB files such as `opencode-dev.db` or `opencode-.db`. Those builds could therefore print and run the migration banner on every startup even though their actual DB already existed.
+
+**Change:** The migration guard now checks the active database path from the storage layer:
+
+```diff
+- const marker = path.join(Global.Path.data, "opencode.db")
++ const marker = Database.Path
+```
+
+The migration still imports legacy JSON storage into SQLite, but it now decides whether to run based on the database file the current build actually uses.
+
+## 33. `packages/opencode/src/agency-swarm/npx.ts` - OpenSwarm global shim writes wrapper commands safely
+
+**Problem:** The global `openswarm` registration originally wrote shims that launched the TUI executable directly. For OpenSwarm wrapper installs, the shim must launch `node bin/openswarm` so the wrapper can set up environment variables, refresh the TUI binary, and start the project correctly. On Windows, PowerShell resolves `openswarm.ps1` before `openswarm.cmd`, so writing only `.cmd` lets an npm-generated `.ps1` shim take precedence. Also, inside the compiled TUI `process.execPath` is the TUI `.exe`, not Node; using it as the Node path generated invalid commands like `agentswarm.exe bin/openswarm`.
+
+**Change:**
+
+- `buildGlobalCommandScript()` accepts an optional `nodeBin` and emits either direct-exe or `node wrapper` commands.
+- Added `buildGlobalPowerShellScript()` and Windows registration now writes both `openswarm.cmd` and `openswarm.ps1`.
+- `registerGlobalCommand()` prefers `OPENSWARM_BIN_PATH` for the wrapper path and uses `OPENSWARM_NODE_PATH` for the real Node executable.
+- If the wrapper path is set but the Node path is missing/invalid, registration is skipped instead of writing a broken shim.
+
+```diff
+- const agentswarmBin = process.env.AGENTSWARM_BIN_PATH ?? process.execPath
++ const openswarmBin = process.env.OPENSWARM_BIN_PATH
++ const agentswarmBin = openswarmBin ?? process.env.AGENTSWARM_BIN_PATH ?? process.execPath
++ const nodeBin = openswarmBin ? process.env.OPENSWARM_NODE_PATH : undefined
+
+- await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin }))
++ await writeFile(cmdPath, buildGlobalCommandScript({ directory, agentswarmBin, nodeBin }))
++ await writeFile(ps1Path, buildGlobalPowerShellScript({ directory, agentswarmBin, nodeBin }))
+```
+
+This keeps the registered `openswarm` command pointed at the OpenSwarm npm wrapper instead of bypassing it or passing the wrapper path as a project argument.

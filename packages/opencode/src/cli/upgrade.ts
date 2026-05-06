@@ -9,6 +9,8 @@ export async function upgrade() {
   const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
   if (config.autoupdate === false || Flag.OPENCODE_DISABLE_AUTOUPDATE) return
   const method = await AppRuntime.runPromise(Installation.Service.use((svc) => svc.method()))
+  const info = await AppRuntime.runPromise(Installation.Service.use((svc) => svc.info())).catch(() => undefined)
+  const current = info?.version ?? InstallationVersion
   const latest = await AppRuntime.runPromise(Installation.Service.use((svc) => svc.latest(method))).catch(() => {})
   if (!latest) return
 
@@ -17,17 +19,7 @@ export async function upgrade() {
     return
   }
 
-  if (InstallationVersion === latest) return
+  if (current === latest) return
 
-  const kind = Installation.getReleaseType(InstallationVersion, latest)
-
-  if (config.autoupdate === "notify" || kind !== "patch") {
-    await Bus.publish(Installation.Event.UpdateAvailable, { version: latest })
-    return
-  }
-
-  if (method === "unknown") return
-  await AppRuntime.runPromise(Installation.Service.use((svc) => svc.upgrade(method, latest)))
-    .then(() => Bus.publish(Installation.Event.Updated, { version: latest }))
-    .catch(() => {})
+  await Bus.publish(Installation.Event.UpdateAvailable, { version: latest })
 }
