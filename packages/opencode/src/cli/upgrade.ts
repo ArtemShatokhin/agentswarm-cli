@@ -4,6 +4,7 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Installation } from "@/installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import semver from "semver"
 
 export async function upgrade() {
   const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
@@ -19,7 +20,7 @@ export async function upgrade() {
     return
   }
 
-  if (current === latest) return
+  if (!semver.gt(latest, current)) return
 
   await Bus.publish(Installation.Event.UpdateAvailable, { version: latest })
 }
