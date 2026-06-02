@@ -603,7 +603,10 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
     )
   }
 
-  const hasTextForItem = (itemID: string) => textKeysForItem(itemID).length > 0
+  const hasTextForPart = (itemID: string, index: number) => {
+    const key = textKey(itemID, index)
+    return textBuffer.has(key) || textOpen.has(key)
+  }
 
   const aggregateTextForItem = (itemID: string) => {
     const prefix = `${itemID}:`
@@ -645,16 +648,18 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
 
   const replayMessageTextParts = (message: Record<string, unknown>, itemID: string) => {
     const parts = extractMessageTextParts(message)
+    const joined = parts.map((part) => part.text).join("\n")
+    const compact = parts.map((part) => part.text).join("")
+    const aggregate = aggregateTextForItem(itemID)
+    if (aggregate !== undefined && (aggregate === joined || aggregate === compact)) return []
     if (parts.length === 1) {
       const [part] = parts
-      if (aggregateTextForItem(itemID) === part.text) return []
       return [{ ...part, index: textIndex.get(itemID) ?? part.index }]
     }
-    if (parts.length > 1 && hasTextForItem(itemID)) {
+    if (parts.length > 1 && parts.every((part) => hasTextForPart(itemID, part.index))) {
       return parts
     }
-    const text = parts.map((part) => part.text).join("\n")
-    return text ? [{ index: textIndex.get(itemID) ?? 0, text }] : []
+    return joined ? [{ index: textIndex.get(itemID) ?? 0, text: joined }] : []
   }
 
   const toolNameFor = (callID: string) => tools.get(callID)?.tool || "tool"

@@ -7113,6 +7113,75 @@ describe("session.agency-swarm", () => {
     expect(deltas).toEqual(["First part", "Second part"])
   })
 
+  test("stream does not duplicate multi-part replay when stream omits content index", async () => {
+    mockHistory()
+    AgencySwarmAdapter.streamRun = async function* () {
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_item.added",
+            output_index: "0",
+            item: { type: "message", id: "msg_no_index_replay" },
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_text.delta",
+            item_id: "msg_no_index_replay",
+            output_index: "0",
+            delta: "First part\nSecond part",
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_text.done",
+            item_id: "msg_no_index_replay",
+            output_index: "0",
+            text: "First part\nSecond part",
+          },
+        },
+      }
+      yield {
+        type: "messages",
+        payload: {
+          new_messages: [
+            {
+              type: "message",
+              id: "msg_no_index_replay",
+              role: "assistant",
+              content: [
+                { type: "output_text", text: "First part" },
+                { type: "output_text", text: "Second part" },
+              ],
+            },
+          ],
+        },
+      }
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    const stream = await SessionAgencySwarm.stream(input)
+    const deltas: string[] = []
+    for await (const event of stream.fullStream) {
+      if (event.type === "text-delta") {
+        deltas.push(event.text)
+      }
+    }
+
+    expect(deltas).toEqual(["First part\nSecond part"])
+  })
+
   test("stream keeps both distinct short assistant messages in the same run (no body-only dedupe)", async () => {
     mockHistory()
     AgencySwarmAdapter.streamRun = async function* () {
