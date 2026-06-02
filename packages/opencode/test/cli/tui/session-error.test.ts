@@ -347,6 +347,26 @@ describe("agency session errors", () => {
     ).toBe(false)
   })
 
+  test("framework mode does not accept GOOGLE_API_KEY unless the provider forwards it", () => {
+    expect(
+      shouldOpenStartupAuthDialog({
+        frameworkMode: true,
+        forwardUpstreamCredentials: true,
+        env: { GOOGLE_API_KEY: "sk-google-env" },
+        providers: [
+          {
+            id: "agency-swarm",
+            name: "Agency Swarm",
+            source: "config",
+            env: [],
+            options: { baseURL: "https://agency.example.com" },
+            models: {},
+          },
+        ],
+      }),
+    ).toBe(true)
+  })
+
   test("framework mode opens auth when forwarding is active and only an agency-swarm bridge token is present", () => {
     // A bridge token authenticates the call to the bridge, not the upstream OpenAI/Anthropic request.
     expect(
