@@ -54,6 +54,7 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
   const textBuffer = new Map<string, string>()
   const textOpen = new Set<string>()
   const textIndex = new Map<string, number>()
+  const textExplicitIndex = new Set<string>()
 
   const reasoningBuffer = new Map<string, string>()
   const reasoningOpen = new Set<string>()
@@ -603,10 +604,7 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
     )
   }
 
-  const hasTextForPart = (itemID: string, index: number) => {
-    const key = textKey(itemID, index)
-    return textBuffer.has(key) || textOpen.has(key)
-  }
+  const hasExplicitTextForPart = (itemID: string, index: number) => textExplicitIndex.has(textKey(itemID, index))
 
   const aggregateTextForItem = (itemID: string) => {
     const prefix = `${itemID}:`
@@ -656,7 +654,7 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       const [part] = parts
       return [{ ...part, index: textIndex.get(itemID) ?? part.index }]
     }
-    if (parts.length > 1 && parts.some((part) => hasTextForPart(itemID, part.index))) {
+    if (parts.length > 1 && parts.some((part) => hasExplicitTextForPart(itemID, part.index))) {
       return parts
     }
     return joined ? [{ index: textIndex.get(itemID) ?? 0, text: joined }] : []
@@ -913,7 +911,9 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       const part = asRecord(nested["part"])
       const partType = asString(part?.["type"]) || ""
       if (partType !== "output_text" && partType !== "refusal") return { parts: [] }
-      const contentIndex = asNumber(nested["content_index"]) ?? 0
+      const rawContentIndex = asNumber(nested["content_index"])
+      const contentIndex = rawContentIndex ?? 0
+      if (rawContentIndex !== undefined) textExplicitIndex.add(textKey(itemID, contentIndex))
       return {
         parts: ensureText(
           itemID,
@@ -929,7 +929,9 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       if (delta === undefined) return { parts: [] }
       const itemID = textItemID(nested)
       if (!itemID) return { parts: [] }
-      const contentIndex = asNumber(nested["content_index"]) ?? textIndex.get(itemID) ?? 0
+      const rawContentIndex = asNumber(nested["content_index"])
+      const contentIndex = rawContentIndex ?? textIndex.get(itemID) ?? 0
+      if (rawContentIndex !== undefined) textExplicitIndex.add(textKey(itemID, contentIndex))
       const textMeta = outputMeta(outputIndex, { content_index: contentIndex })
       return {
         parts: [
@@ -942,7 +944,9 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
     if (responseType === "response.output_text.done" || responseType === "response.content_part.done") {
       const itemID = textItemID(nested)
       if (!itemID) return { parts: [] }
-      const contentIndex = asNumber(nested["content_index"]) ?? textIndex.get(itemID) ?? 0
+      const rawContentIndex = asNumber(nested["content_index"])
+      const contentIndex = rawContentIndex ?? textIndex.get(itemID) ?? 0
+      if (rawContentIndex !== undefined) textExplicitIndex.add(textKey(itemID, contentIndex))
       const part = asRecord(nested["part"])
       const final =
         asRawString(nested["text"]) ??
