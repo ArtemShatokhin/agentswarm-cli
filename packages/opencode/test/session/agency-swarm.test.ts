@@ -6967,6 +6967,61 @@ describe("session.agency-swarm", () => {
     expect(deltas).toEqual(["Done", "Done"])
   })
 
+  test("stream keeps a repeated assistant message while another matching item is still open", async () => {
+    mockHistory()
+    AgencySwarmAdapter.streamRun = async function* () {
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_item.added",
+            output_index: "0",
+            item: { type: "message", id: "msg_open_repeat_a" },
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_text.delta",
+            item_id: "msg_open_repeat_a",
+            output_index: "0",
+            delta: "OK",
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "run_item_stream_event",
+          name: "message_output_created",
+          item: {
+            raw_item: {
+              type: "message",
+              id: "msg_open_repeat_b",
+              content: [{ type: "output_text", text: "OK" }],
+            },
+          },
+        },
+      }
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    const stream = await SessionAgencySwarm.stream(input)
+    const deltas: string[] = []
+    for await (const event of stream.fullStream) {
+      if (event.type === "text-delta") {
+        deltas.push(event.text)
+      }
+    }
+
+    expect(deltas).toEqual(["OK", "OK"])
+  })
+
   test("stream does not duplicate reasoning when reasoning_item_created follows summary events", async () => {
     mockHistory()
     AgencySwarmAdapter.streamRun = async function* () {
@@ -7032,6 +7087,60 @@ describe("session.agency-swarm", () => {
     }
 
     expect(deltas).toEqual(["Find the right file first."])
+  })
+
+  test("stream keeps repeated reasoning while another matching reasoning item is still open", async () => {
+    mockHistory()
+    AgencySwarmAdapter.streamRun = async function* () {
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_item.added",
+            output_index: "1",
+            item: { type: "reasoning", id: "rs_open_repeat_a" },
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.reasoning_summary_text.delta",
+            item_id: "rs_open_repeat_a",
+            summary_index: "0",
+            output_index: "1",
+            delta: "Check cache.",
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "run_item_stream_event",
+          name: "reasoning_item_created",
+          item: {
+            raw_item: {
+              type: "reasoning",
+              id: "rs_open_repeat_b",
+              summary: [{ text: "Check cache." }],
+            },
+          },
+        },
+      }
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    const stream = await SessionAgencySwarm.stream(input)
+    const deltas: string[] = []
+    for await (const event of stream.fullStream) {
+      if (event.type === "reasoning-delta") deltas.push(event.text)
+    }
+
+    expect(deltas).toEqual(["Check cache.", "Check cache."])
   })
 
   test("stream does not duplicate tool input when tool_called follows output_item.added", async () => {
