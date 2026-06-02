@@ -656,7 +656,7 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       const [part] = parts
       return [{ ...part, index: textIndex.get(itemID) ?? part.index }]
     }
-    if (parts.length > 1 && parts.every((part) => hasTextForPart(itemID, part.index))) {
+    if (parts.length > 1 && parts.some((part) => hasTextForPart(itemID, part.index))) {
       return parts
     }
     return joined ? [{ index: textIndex.get(itemID) ?? 0, text: joined }] : []
