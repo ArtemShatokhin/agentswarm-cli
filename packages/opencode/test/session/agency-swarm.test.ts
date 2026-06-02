@@ -6966,6 +6966,74 @@ describe("session.agency-swarm", () => {
     expect(deltas).toEqual(["The current time is 07:29."])
   })
 
+  test("stream does not duplicate new_messages replay for nonzero content index", async () => {
+    mockHistory()
+    AgencySwarmAdapter.streamRun = async function* () {
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_item.added",
+            output_index: "0",
+            item: { type: "message", id: "msg_indexed_replay" },
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_text.delta",
+            item_id: "msg_indexed_replay",
+            content_index: "1",
+            output_index: "0",
+            delta: "Indexed final text",
+          },
+        },
+      }
+      yield {
+        type: "data",
+        payload: {
+          type: "raw_response_event",
+          data: {
+            type: "response.output_text.done",
+            item_id: "msg_indexed_replay",
+            content_index: "1",
+            output_index: "0",
+            text: "Indexed final text",
+          },
+        },
+      }
+      yield {
+        type: "messages",
+        payload: {
+          new_messages: [
+            {
+              type: "message",
+              id: "msg_indexed_replay",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Indexed final text" }],
+            },
+          ],
+        },
+      }
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    const stream = await SessionAgencySwarm.stream(input)
+    const deltas: string[] = []
+    for await (const event of stream.fullStream) {
+      if (event.type === "text-delta") {
+        deltas.push(event.text)
+      }
+    }
+
+    expect(deltas).toEqual(["Indexed final text"])
+  })
+
   test("stream keeps repeated assistant text from a different provider response", async () => {
     mockHistory()
     AgencySwarmAdapter.streamRun = async function* () {
