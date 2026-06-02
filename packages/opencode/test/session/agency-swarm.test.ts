@@ -1451,6 +1451,76 @@ describe("session.agency-swarm", () => {
     })
   })
 
+  test("stream preserves explicit OpenRouter extra body fields when applying variants", async () => {
+    mockHistory()
+    globalThis.fetch = mock(async () => Response.json({ data: { is_free_tier: false } })) as unknown as typeof fetch
+    spyOn(Auth, "all").mockImplementation(async () => ({
+      openrouter: { type: "api", key: "stored-openrouter" } as any,
+    })) as typeof Auth.all
+    spyOn(Env, "all").mockImplementation(() => ({
+      OPENROUTER_API_KEY: "env-openrouter",
+    })) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({
+      openrouter: {
+        id: "openrouter",
+        name: "OpenRouter",
+        source: "api",
+        env: ["OPENROUTER_API_KEY"],
+        options: {},
+        models: {},
+      },
+    })) as typeof Provider.list
+    AgencySwarmAdapter.getMetadata = (async () => ({
+      agency_swarm_version: "1.9.3",
+      metadata: { agents: ["AgentA"] },
+      nodes: [],
+    })) as typeof AgencySwarmAdapter.getMetadata
+
+    let captured: Record<string, unknown> | undefined
+    AgencySwarmAdapter.streamRun = async function* (input) {
+      captured = input.clientConfig
+      yield { type: "end" }
+    } as typeof AgencySwarmAdapter.streamRun
+
+    const { input } = helper()
+    input.options.clientConfig = {
+      model_settings_extra_args: {
+        extra_body: {
+          provider: {
+            order: ["Anthropic"],
+          },
+        },
+      },
+    }
+    input.sessionModel = {
+      providerID: "openrouter",
+      modelID: "anthropic/claude-sonnet-4.5",
+      variantOptions: {
+        reasoning: { effort: "high" },
+      },
+    }
+
+    const stream = await SessionAgencySwarm.stream(input)
+    for await (const _event of stream.fullStream) {
+      // consume
+    }
+
+    expect(captured).toEqual({
+      api_key: "env-openrouter",
+      model: "openrouter/anthropic/claude-sonnet-4.5",
+      model_settings_extra_args: {
+        extra_body: {
+          provider: {
+            order: ["Anthropic"],
+          },
+          reasoning: {
+            effort: "high",
+          },
+        },
+      },
+    })
+  })
+
   test("stream leaves OpenRouter Claude max tokens unset for paid tier keys", async () => {
     mockHistory()
     globalThis.fetch = mock(async () => Response.json({ data: { is_free_tier: false } })) as unknown as typeof fetch

@@ -158,9 +158,9 @@ function envNamesForPrimaryProvider(id: (typeof AGENCY_SWARM_PRIMARY_AUTH_PROVID
     case "anthropic":
       return ["ANTHROPIC_API_KEY"]
     case "google":
-      return ["GOOGLE_API_KEY", "GEMINI_API_KEY"]
+      return ["GEMINI_API_KEY"]
     case "gemini":
-      return ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+      return ["GEMINI_API_KEY"]
     case "xai":
       return ["XAI_API_KEY"]
     case "openrouter":

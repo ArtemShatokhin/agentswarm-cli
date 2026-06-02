@@ -35,10 +35,10 @@ async function finalizeClientConfig(
   const explicitModel = explicitForModel && asString(explicitForModel["model"])
   const applySessionSettings = async (out: Record<string, unknown>) => {
     if (sessionModelSettingsExtraArgs && Object.keys(sessionModelSettingsExtraArgs).length > 0) {
-      out["model_settings_extra_args"] = {
-        ...(asRecord(out["model_settings_extra_args"]) ?? {}),
-        ...sessionModelSettingsExtraArgs,
-      }
+      out["model_settings_extra_args"] = mergeModelSettingsExtraArgs(
+        asRecord(out["model_settings_extra_args"]) ?? {},
+        sessionModelSettingsExtraArgs,
+      )
     }
     await applyOpenRouterTokenPolicy(out)
     return out
@@ -62,6 +62,22 @@ async function finalizeClientConfig(
     return applySessionSettings({})
   }
   return undefined
+}
+
+function mergeModelSettingsExtraArgs(
+  current: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...current, ...next }
+  const currentExtraBody = asRecord(current["extra_body"])
+  const nextExtraBody = asRecord(next["extra_body"])
+  if (currentExtraBody || nextExtraBody) {
+    merged["extra_body"] = {
+      ...(currentExtraBody ?? {}),
+      ...(nextExtraBody ?? {}),
+    }
+  }
+  return merged
 }
 
 async function applyOpenRouterTokenPolicy(out: Record<string, unknown>) {
