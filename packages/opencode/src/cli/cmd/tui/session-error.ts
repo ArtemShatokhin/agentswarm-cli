@@ -1,5 +1,6 @@
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
 import { hasClientConfigCredential } from "@/agency-swarm/client-config"
+import { isOpenRouterClientConfigModel } from "@/agency-swarm/litellm-provider"
 import { isAgencySwarmRunMode, type AgencySwarmRunModeInput } from "@/agency-swarm/run-mode"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/util"
@@ -15,7 +16,6 @@ export const AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS = [
   "openrouter",
 ] as const
 const log = Log.create({ service: "tui.session-error" })
-type AgencySwarmPrimaryAuthProviderID = (typeof AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS)[number]
 
 /**
  * True when a provider id is usable in Agent Swarm framework mode: either the
@@ -26,15 +26,10 @@ type AgencySwarmPrimaryAuthProviderID = (typeof AGENCY_SWARM_PRIMARY_AUTH_PROVID
  */
 export function isAgencySupportedProvider(providerID: string) {
   if (providerID === AgencySwarmAdapter.PROVIDER_ID) return true
-  return isPrimaryAuthProviderID(providerID)
-}
-
-function isPrimaryAuthProviderID(providerID: string): providerID is AgencySwarmPrimaryAuthProviderID {
   return (AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS as readonly string[]).includes(providerID)
 }
 
 type ProviderAuthMap = Record<string, ProviderAuthMethod[]>
-type SelectedModel = { providerID: string; modelID?: string }
 type AuthProvider = {
   id: string
   env: string[]
@@ -118,8 +113,8 @@ export function isSupportedAgencyAuthProvider(
   providerID: string,
   _provider?: AuthProvider,
   _methods: ProviderAuthMethod[] = [],
-): providerID is AgencySwarmPrimaryAuthProviderID {
-  return isPrimaryAuthProviderID(providerID)
+) {
+  return (AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS as readonly string[]).includes(providerID)
 }
 
 function isAgencyProviderCredentialFailure(message: string) {
@@ -133,57 +128,51 @@ function hasSupportedAgencyCredential(
   providers: Provider[],
   providerAuth: ProviderAuthMap = {},
   env: Record<string, string | undefined> = {},
-  targetProviderIDs?: readonly AgencySwarmPrimaryAuthProviderID[],
+  directOpenRouter = false,
 ) {
-  if (targetProviderIDs?.length === 0) return false
+  if (directOpenRouter) {
+    if (isNonEmptyEnv(env["OPENROUTER_API_KEY"])) return true
+    const openrouter = providers.find((provider) => provider.id === "openrouter")
+    if (!openrouter) return false
+    if (hasEnvCredentialForProvider(openrouter, env)) return true
+    return hasCredential(openrouter, providerAuth) || hasConfiguredAPIStyleCredential(openrouter)
+  }
+
   const providerMatch = providers.some((provider) => {
     if (provider.id === AgencySwarmAdapter.PROVIDER_ID) return false
-    if (targetProviderIDs && !(targetProviderIDs as readonly string[]).includes(provider.id)) return false
     if (!isSupportedAgencyAuthProvider(provider.id, provider, providerAuth[provider.id] ?? [])) return false
     if (hasEnvCredentialForProvider(provider, env)) return true
     if (provider.id === "openai") return hasCredential(provider, providerAuth)
     return hasConfiguredAPIStyleCredential(provider)
   })
   if (providerMatch) return true
-  // Mirror the bridge's direct env reads (SessionAgencySwarm.buildAuthClientConfig): primary-provider env vars
-  // are upstream creds even when the provider is filtered out of the enabled list.
-  const fallbackIDs = targetProviderIDs ?? AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS
-  return fallbackIDs.some((id) => envNamesForPrimaryProvider(id).some((name) => isNonEmptyEnv(env[name])))
+  // Mirror bridge env fallbacks that do not require the upstream provider to be present.
+  return isNonEmptyEnv(env["OPENAI_API_KEY"])
 }
 
 function hasEnvCredentialForProvider(provider: AuthProvider | Provider, env: Record<string, string | undefined>) {
   return (provider.env ?? []).some((name) => isNonEmptyEnv(env[name]))
 }
 
+function usesDirectOpenRouterRoute(input: {
+  providers: Provider[]
+  currentProviderID?: string
+  configuredModel?: string
+  agentModel?: { providerID: string; modelID: string }
+}) {
+  const agency = input.providers.find((provider) => provider.id === AgencySwarmAdapter.PROVIDER_ID)
+  const raw = agency?.options?.["clientConfig"] ?? agency?.options?.["client_config"]
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const model = (raw as Record<string, unknown>)["model"]
+    if (typeof model === "string" && isOpenRouterClientConfigModel(model)) return true
+  }
+  if (isOpenRouterClientConfigModel(input.configuredModel)) return true
+  if (input.agentModel?.providerID === "openrouter") return true
+  return input.currentProviderID === "openrouter"
+}
+
 function isNonEmptyEnv(value: string | undefined) {
   return typeof value === "string" && value.trim().length > 0
-}
-
-function envNamesForPrimaryProvider(id: AgencySwarmPrimaryAuthProviderID) {
-  switch (id) {
-    case "openai":
-      return ["OPENAI_API_KEY"]
-    case "anthropic":
-      return ["ANTHROPIC_API_KEY"]
-    case "google":
-      return ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"]
-    case "gemini":
-      return ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"]
-    case "xai":
-      return ["XAI_API_KEY"]
-    case "openrouter":
-      return ["OPENROUTER_API_KEY"]
-  }
-}
-
-function targetAuthProviderIDs(
-  selectedModel: SelectedModel | undefined,
-): readonly AgencySwarmPrimaryAuthProviderID[] | undefined {
-  const providerID = selectedModel?.providerID
-  if (!providerID || providerID === AgencySwarmAdapter.PROVIDER_ID) return undefined
-  if (providerID === "google" || providerID === "gemini") return ["google", "gemini"]
-  if (isSupportedAgencyAuthProvider(providerID)) return [providerID]
-  return []
 }
 
 function hasExplicitAgencyClientConfig(provider: Provider | undefined) {
@@ -209,24 +198,29 @@ export function shouldOpenStartupAuthDialog(input: {
   providers: Provider[]
   providerAuth?: ProviderAuthMap
   frameworkMode: boolean
+  currentProviderID?: string
+  configuredModel?: string
+  agentModel?: { providerID: string; modelID: string }
   /** Override for the upstream-credential forwarding path; when undefined the value is inferred from env + provider options. */
   forwardUpstreamCredentials?: boolean
   /** Process env snapshot; production callers pass `process.env`, tests pass a controlled map. */
   env?: Record<string, string | undefined>
-  selectedModel?: SelectedModel
 }) {
   if (!input.frameworkMode) return !hasUsableProvider(input.providers, false, input.providerAuth)
 
   const env = input.env ?? {}
   const agencyProvider = input.providers.find((provider) => provider.id === AgencySwarmAdapter.PROVIDER_ID)
   const forwardingActive = isForwardUpstreamCredentialsActive(input.providers, input.forwardUpstreamCredentials)
+  const directOpenRouter = usesDirectOpenRouterRoute(input)
 
   // Explicit client_config on the agency-swarm provider carries upstream creds and satisfies either mode.
   if (agencyProvider && hasExplicitAgencyClientConfig(agencyProvider)) return false
 
   // A bridge token only authenticates the call to the bridge; under forwarding it does NOT stand in
-  // for the upstream OpenAI/Anthropic credential resolveClientConfig() still needs.
-  if (!forwardingActive && agencyProvider && hasCredential(agencyProvider, input.providerAuth)) return false
+  // for the upstream provider credential resolveClientConfig() still needs.
+  if (!directOpenRouter && !forwardingActive && agencyProvider && hasCredential(agencyProvider, input.providerAuth)) {
+    return false
+  }
 
   if (!forwardingActive && !usesLocalAgencyProviderAuth(input.providers)) return false
 
@@ -234,7 +228,7 @@ export function shouldOpenStartupAuthDialog(input: {
     input.providers,
     input.providerAuth,
     env,
-    targetAuthProviderIDs(input.selectedModel),
+    directOpenRouter,
   )
 }
 
@@ -245,15 +239,16 @@ export function shouldBlockAgencyPromptSend(input: {
   providers: Provider[]
   providerAuth?: ProviderAuthMap
   env?: Record<string, string | undefined>
-  selectedModel?: SelectedModel
 }) {
   if (!isAgencySwarmFrameworkMode(input)) return false
   return shouldOpenStartupAuthDialog({
     providers: input.providers,
     providerAuth: input.providerAuth,
     frameworkMode: true,
+    currentProviderID: input.currentProviderID,
+    configuredModel: input.configuredModel,
+    agentModel: input.agentModel,
     env: input.env,
-    selectedModel: input.selectedModel,
   })
 }
 
@@ -266,7 +261,6 @@ export function shouldBlockAgencyPromptSubmit(input: {
   mode: "normal" | "shell"
   isSlashCommand: boolean
   env?: Record<string, string | undefined>
-  selectedModel?: SelectedModel
 }) {
   if (input.mode === "shell" || input.isSlashCommand) return false
   return shouldBlockAgencyPromptSend(input)

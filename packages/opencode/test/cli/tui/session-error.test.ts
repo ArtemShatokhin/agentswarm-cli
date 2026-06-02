@@ -325,7 +325,59 @@ describe("agency session errors", () => {
     ).toBe(false)
   })
 
-  test("framework mode skips auth from env even when the primary provider is filtered out", () => {
+  test("framework mode skips auth for direct OpenRouter client_config model with env key", () => {
+    const providers = [
+      {
+        id: "agency-swarm",
+        name: "Agency Swarm",
+        source: "config",
+        env: [],
+        options: {
+          baseURL: "http://127.0.0.1:8080",
+          clientConfig: {
+            model: "openrouter/anthropic/claude-sonnet-4.5",
+          },
+        },
+        models: {},
+      },
+    ] satisfies Provider[]
+    const env = { OPENROUTER_API_KEY: "sk-openrouter-env" }
+
+    expect(
+      shouldOpenStartupAuthDialog({
+        frameworkMode: true,
+        env,
+        providers,
+      }),
+    ).toBe(false)
+    expect(
+      shouldBlockAgencyPromptSubmit({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers,
+        env,
+        mode: "normal",
+        isSlashCommand: false,
+      }),
+    ).toBe(false)
+    expect(
+      shouldOpenStartupAuthDialog({
+        frameworkMode: true,
+        env: { OPENAI_API_KEY: "sk-openai-env" },
+        providers,
+      }),
+    ).toBe(true)
+    expect(
+      shouldOpenStartupAuthDialog({
+        frameworkMode: true,
+        providers: providers.map((provider) =>
+          provider.id === "agency-swarm" ? { ...provider, key: "bridge-token" } : provider,
+        ),
+      }),
+    ).toBe(true)
+  })
+
+  test("framework mode skips auth from OpenAI env even when OpenAI provider is filtered out", () => {
     // Mirrors SessionAgencySwarm.buildAuthClientConfig()'s direct OPENAI_API_KEY read:
     // the bridge can authenticate via env even when openai is not in the enabled provider list.
     expect(
@@ -347,24 +399,26 @@ describe("agency session errors", () => {
     ).toBe(false)
   })
 
-  test("framework mode does not accept GOOGLE_API_KEY unless the provider forwards it", () => {
-    expect(
-      shouldOpenStartupAuthDialog({
-        frameworkMode: true,
-        forwardUpstreamCredentials: true,
-        env: { GOOGLE_API_KEY: "sk-google-env" },
-        providers: [
-          {
-            id: "agency-swarm",
-            name: "Agency Swarm",
-            source: "config",
-            env: [],
-            options: { baseURL: "https://agency.example.com" },
-            models: {},
-          },
-        ],
-      }),
-    ).toBe(true)
+  test("framework mode opens auth for env keys the bridge cannot forward without a provider", () => {
+    for (const name of ["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"]) {
+      expect(
+        shouldOpenStartupAuthDialog({
+          frameworkMode: true,
+          forwardUpstreamCredentials: true,
+          env: { [name]: "sk-from-env" },
+          providers: [
+            {
+              id: "agency-swarm",
+              name: "Agency Swarm",
+              source: "config",
+              env: [],
+              options: { baseURL: "https://agency.example.com" },
+              models: {},
+            },
+          ],
+        }),
+      ).toBe(true)
+    }
   })
 
   test("framework mode opens auth when forwarding is active and only an agency-swarm bridge token is present", () => {
@@ -856,116 +910,6 @@ describe("agency session errors", () => {
             models: {},
           },
         ],
-      }),
-    ).toBe(false)
-  })
-
-  test("framework prompt blocks when selected upstream provider lacks matching credential", () => {
-    const providers: Provider[] = [
-      {
-        id: "agency-swarm",
-        name: "Agency Swarm",
-        source: "config",
-        env: [],
-        options: {},
-        models: {},
-      },
-      {
-        id: "openai",
-        name: "OpenAI",
-        source: "api",
-        env: ["OPENAI_API_KEY"],
-        key: "sk-openai",
-        options: {},
-        models: {},
-      },
-    ]
-
-    expect(
-      shouldBlockAgencyPromptSend({
-        currentProviderID: "agency-swarm",
-        configuredModel: "agency-swarm/default",
-        providers,
-        selectedModel: {
-          providerID: "google",
-          modelID: "gemini-2.5-pro",
-        },
-      }),
-    ).toBe(true)
-
-    expect(
-      shouldBlockAgencyPromptSend({
-        currentProviderID: "agency-swarm",
-        configuredModel: "agency-swarm/default",
-        providers,
-        selectedModel: {
-          providerID: "openrouter",
-          modelID: "anthropic/claude-sonnet-4.5",
-        },
-      }),
-    ).toBe(true)
-  })
-
-  test("framework prompt allows selected upstream provider with matching credential", () => {
-    expect(
-      shouldBlockAgencyPromptSend({
-        currentProviderID: "agency-swarm",
-        configuredModel: "agency-swarm/default",
-        providers: [
-          {
-            id: "agency-swarm",
-            name: "Agency Swarm",
-            source: "config",
-            env: [],
-            options: {},
-            models: {},
-          },
-          {
-            id: "openrouter",
-            name: "OpenRouter",
-            source: "api",
-            env: ["OPENROUTER_API_KEY"],
-            key: "openrouter-key",
-            options: {},
-            models: {},
-          },
-        ],
-        selectedModel: {
-          providerID: "openrouter",
-          modelID: "anthropic/claude-sonnet-4.5",
-        },
-      }),
-    ).toBe(false)
-
-    expect(
-      shouldBlockAgencyPromptSend({
-        currentProviderID: "agency-swarm",
-        configuredModel: "agency-swarm/default",
-        providers: [
-          {
-            id: "agency-swarm",
-            name: "Agency Swarm",
-            source: "config",
-            env: [],
-            options: {},
-            models: {},
-          },
-          {
-            id: "google",
-            name: "Google",
-            source: "config",
-            env: ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
-            options: {},
-            models: {},
-          },
-        ],
-        env: {
-          GEMINI_API_KEY: "gemini-key",
-        },
-        selectedModel: {
-          providerID: "google",
-          modelID: "gemini-2.5-pro",
-        },
       }),
     ).toBe(false)
   })
