@@ -35,11 +35,17 @@ async function finalizeClientConfig(
   const explicitModel = explicitForModel && asString(explicitForModel["model"])
   const applySessionSettings = async (out: Record<string, unknown>) => {
     if (sessionModelSettingsExtraArgs && Object.keys(sessionModelSettingsExtraArgs).length > 0) {
-      out["model_settings_extra_args"] = {
-        ...(asRecord(out["model_settings_extra_args"]) ?? {}),
-        ...sessionModelSettingsExtraArgs,
+      const existing = asRecord(out["model_settings_extra_args"]) ?? asRecord(out["modelSettingsExtraArgs"]) ?? {}
+      const settings = mergeModelSettingsExtraArgs(existing, sessionModelSettingsExtraArgs)
+      if (existing["max_tokens"] !== undefined && settings["__openrouter_default_max_tokens"] === true) {
+        delete settings["__openrouter_default_max_tokens"]
       }
+      out["model_settings_extra_args"] = {
+        ...settings,
+      }
+      delete out["modelSettingsExtraArgs"]
     }
+    promoteOpenRouterLiteLLMKey(out)
     await applyOpenRouterTokenPolicy(out)
     return out
   }
@@ -64,6 +70,35 @@ async function finalizeClientConfig(
   return undefined
 }
 
+function mergeModelSettingsExtraArgs(
+  existing: Record<string, unknown>,
+  session: Record<string, unknown>,
+): Record<string, unknown> {
+  const settings = {
+    ...existing,
+    ...session,
+  }
+  const existingExtraBody = asRecord(existing["extra_body"])
+  const sessionExtraBody = asRecord(session["extra_body"])
+  if (existingExtraBody && sessionExtraBody) {
+    settings["extra_body"] = {
+      ...existingExtraBody,
+      ...sessionExtraBody,
+    }
+  }
+  return settings
+}
+
+function promoteOpenRouterLiteLLMKey(out: Record<string, unknown>) {
+  const model = asString(out["model"])
+  if (!model || !isOpenRouterClientConfigModel(model)) return
+  if (asString(out["api_key"]) || asString(out["apiKey"])) return
+
+  const keys = asRecord(out["litellm_keys"]) ?? asRecord(out["litellmKeys"])
+  const key = asString(keys?.["openrouter"])
+  if (key) out["api_key"] = key
+}
+
 async function applyOpenRouterTokenPolicy(out: Record<string, unknown>) {
   const model = asString(out["model"])
   if (!model || !isOpenRouterClientConfigModel(model)) return
@@ -72,7 +107,21 @@ async function applyOpenRouterTokenPolicy(out: Record<string, unknown>) {
   if (!modelSettings || modelSettings["__openrouter_default_max_tokens"] !== true) return
 
   delete modelSettings["__openrouter_default_max_tokens"]
-  const apiKey = asString(out["api_key"]) ?? asString(out["apiKey"])
+  if (!targetsOpenRouterAPI(asString(out["base_url"]) ?? asString(out["baseURL"]))) {
+    delete modelSettings["max_tokens"]
+    if (Object.keys(modelSettings).length === 0) {
+      delete out["model_settings_extra_args"]
+    }
+    return
+  }
+  const apiKey = asString(out["api_key"]) ?? asString(out["apiKey"]) ?? readOpenRouterAuthorizationKey(out)
+  if (!apiKey) {
+    delete modelSettings["max_tokens"]
+    if (Object.keys(modelSettings).length === 0) {
+      delete out["model_settings_extra_args"]
+    }
+    return
+  }
   const freeTier = await isOpenRouterFreeTier(apiKey)
   if (freeTier) {
     modelSettings["max_tokens"] = OPENROUTER_FREE_TIER_MAX_TOKENS
@@ -84,8 +133,24 @@ async function applyOpenRouterTokenPolicy(out: Record<string, unknown>) {
   }
 }
 
-async function isOpenRouterFreeTier(apiKey: string | undefined): Promise<boolean> {
-  if (!apiKey) return true
+function readOpenRouterAuthorizationKey(out: Record<string, unknown>): string | undefined {
+  const headers = readCredentialHeaders(out)
+  const auth = headers?.["Authorization"] ?? headers?.["authorization"]
+  if (!auth) return undefined
+  const match = auth.trim().match(/^Bearer\s+(.+)$/i)
+  return match?.[1]?.trim() || undefined
+}
+
+function targetsOpenRouterAPI(baseURL: string | undefined): boolean {
+  if (!baseURL) return true
+  try {
+    return new URL(baseURL).hostname === "openrouter.ai"
+  } catch {
+    return false
+  }
+}
+
+async function isOpenRouterFreeTier(apiKey: string): Promise<boolean> {
   try {
     const response = await fetch(OPENROUTER_KEY_URL, {
       method: "GET",
@@ -129,7 +194,7 @@ export async function resolveClientConfig(
   const rawGenerated = forwardGenerated
     ? await buildAuthClientConfig(await Auth.all(), await listProvidersForEnvCheck(), await getEnvForClientConfig(), {
         skipOpenAIApiKeyInjection: skipOpenAIApiKey,
-        skipOpenAIOAuthFromStored: hasExplicitOpenAIClientConfig(config),
+        skipOpenAIOAuthFromStored: hasExplicitOpenAIClientConfig(config) || targetOpenRouter,
         allowStoredOpenAIOAuth: !explicitUpstreamBaseURL || isCodexAPIBaseURL(explicitUpstreamBaseURL),
         targetOpenRouter,
       })
@@ -235,6 +300,7 @@ async function buildAuthClientConfig(
 
     if (providerID === "openrouter") {
       if (options.targetOpenRouter) payload["api_key"] = key
+      else litellmKeys["openrouter"] = key
       continue
     }
 
@@ -268,6 +334,7 @@ async function buildAuthClientConfig(
 
     if (providerID === "openrouter") {
       if (options.targetOpenRouter) payload["api_key"] = auth.key
+      else litellmKeys["openrouter"] = auth.key
       continue
     }
 
