@@ -801,7 +801,7 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       if (!itemID) return []
       const text = extractMessageText(rawItem)
       if (!text) return []
-      const index = 0
+      const index = textIndex.get(itemID) ?? 0
       if (shouldSkipDuplicateAssistantText(itemID, index, text)) {
         return []
       }
@@ -1069,9 +1069,10 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       if (!itemID) continue
       const text = extractMessageText(message)
       if (!text) continue
-      if (shouldSkipDuplicateAssistantText(itemID, 0, text)) continue
+      const index = textIndex.get(itemID) ?? 0
+      if (shouldSkipDuplicateAssistantText(itemID, index, text)) continue
       parts.push(
-        ...finishText(itemID, 0, text, messageMeta, {
+        ...finishText(itemID, index, text, messageMeta, {
           source: "messages",
           ...agentUpdatedHandoffMetadata(messageMeta.agent),
         }),
