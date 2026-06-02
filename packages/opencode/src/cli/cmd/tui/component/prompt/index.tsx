@@ -1017,6 +1017,7 @@ export function Prompt(props: PromptProps) {
         mode: currentMode,
         isSlashCommand: isServerSlashCommand,
         env: process.env,
+        selectedModel,
       })
     ) {
       toast.show({

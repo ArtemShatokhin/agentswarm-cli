@@ -15,6 +15,7 @@ export const AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS = [
   "openrouter",
 ] as const
 const log = Log.create({ service: "tui.session-error" })
+type AgencySwarmPrimaryAuthProviderID = (typeof AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS)[number]
 
 /**
  * True when a provider id is usable in Agent Swarm framework mode: either the
@@ -25,10 +26,15 @@ const log = Log.create({ service: "tui.session-error" })
  */
 export function isAgencySupportedProvider(providerID: string) {
   if (providerID === AgencySwarmAdapter.PROVIDER_ID) return true
+  return isPrimaryAuthProviderID(providerID)
+}
+
+function isPrimaryAuthProviderID(providerID: string): providerID is AgencySwarmPrimaryAuthProviderID {
   return (AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS as readonly string[]).includes(providerID)
 }
 
 type ProviderAuthMap = Record<string, ProviderAuthMethod[]>
+type SelectedModel = { providerID: string; modelID?: string }
 type AuthProvider = {
   id: string
   env: string[]
@@ -112,8 +118,8 @@ export function isSupportedAgencyAuthProvider(
   providerID: string,
   _provider?: AuthProvider,
   _methods: ProviderAuthMethod[] = [],
-) {
-  return (AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS as readonly string[]).includes(providerID)
+): providerID is AgencySwarmPrimaryAuthProviderID {
+  return isPrimaryAuthProviderID(providerID)
 }
 
 function isAgencyProviderCredentialFailure(message: string) {
@@ -127,9 +133,12 @@ function hasSupportedAgencyCredential(
   providers: Provider[],
   providerAuth: ProviderAuthMap = {},
   env: Record<string, string | undefined> = {},
+  targetProviderIDs?: readonly AgencySwarmPrimaryAuthProviderID[],
 ) {
+  if (targetProviderIDs?.length === 0) return false
   const providerMatch = providers.some((provider) => {
     if (provider.id === AgencySwarmAdapter.PROVIDER_ID) return false
+    if (targetProviderIDs && !(targetProviderIDs as readonly string[]).includes(provider.id)) return false
     if (!isSupportedAgencyAuthProvider(provider.id, provider, providerAuth[provider.id] ?? [])) return false
     if (hasEnvCredentialForProvider(provider, env)) return true
     if (provider.id === "openai") return hasCredential(provider, providerAuth)
@@ -138,9 +147,8 @@ function hasSupportedAgencyCredential(
   if (providerMatch) return true
   // Mirror the bridge's direct env reads (SessionAgencySwarm.buildAuthClientConfig): primary-provider env vars
   // are upstream creds even when the provider is filtered out of the enabled list.
-  return AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS.some((id) =>
-    envNamesForPrimaryProvider(id).some((name) => isNonEmptyEnv(env[name])),
-  )
+  const fallbackIDs = targetProviderIDs ?? AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS
+  return fallbackIDs.some((id) => envNamesForPrimaryProvider(id).some((name) => isNonEmptyEnv(env[name])))
 }
 
 function hasEnvCredentialForProvider(provider: AuthProvider | Provider, env: Record<string, string | undefined>) {
@@ -151,21 +159,31 @@ function isNonEmptyEnv(value: string | undefined) {
   return typeof value === "string" && value.trim().length > 0
 }
 
-function envNamesForPrimaryProvider(id: (typeof AGENCY_SWARM_PRIMARY_AUTH_PROVIDER_IDS)[number]) {
+function envNamesForPrimaryProvider(id: AgencySwarmPrimaryAuthProviderID) {
   switch (id) {
     case "openai":
       return ["OPENAI_API_KEY"]
     case "anthropic":
       return ["ANTHROPIC_API_KEY"]
     case "google":
-      return ["GEMINI_API_KEY"]
+      return ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"]
     case "gemini":
-      return ["GEMINI_API_KEY"]
+      return ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"]
     case "xai":
       return ["XAI_API_KEY"]
     case "openrouter":
       return ["OPENROUTER_API_KEY"]
   }
+}
+
+function targetAuthProviderIDs(
+  selectedModel: SelectedModel | undefined,
+): readonly AgencySwarmPrimaryAuthProviderID[] | undefined {
+  const providerID = selectedModel?.providerID
+  if (!providerID || providerID === AgencySwarmAdapter.PROVIDER_ID) return undefined
+  if (providerID === "google" || providerID === "gemini") return ["google", "gemini"]
+  if (isSupportedAgencyAuthProvider(providerID)) return [providerID]
+  return []
 }
 
 function hasExplicitAgencyClientConfig(provider: Provider | undefined) {
@@ -195,6 +213,7 @@ export function shouldOpenStartupAuthDialog(input: {
   forwardUpstreamCredentials?: boolean
   /** Process env snapshot; production callers pass `process.env`, tests pass a controlled map. */
   env?: Record<string, string | undefined>
+  selectedModel?: SelectedModel
 }) {
   if (!input.frameworkMode) return !hasUsableProvider(input.providers, false, input.providerAuth)
 
@@ -211,7 +230,12 @@ export function shouldOpenStartupAuthDialog(input: {
 
   if (!forwardingActive && !usesLocalAgencyProviderAuth(input.providers)) return false
 
-  return !hasSupportedAgencyCredential(input.providers, input.providerAuth, env)
+  return !hasSupportedAgencyCredential(
+    input.providers,
+    input.providerAuth,
+    env,
+    targetAuthProviderIDs(input.selectedModel),
+  )
 }
 
 export function shouldBlockAgencyPromptSend(input: {
@@ -221,6 +245,7 @@ export function shouldBlockAgencyPromptSend(input: {
   providers: Provider[]
   providerAuth?: ProviderAuthMap
   env?: Record<string, string | undefined>
+  selectedModel?: SelectedModel
 }) {
   if (!isAgencySwarmFrameworkMode(input)) return false
   return shouldOpenStartupAuthDialog({
@@ -228,6 +253,7 @@ export function shouldBlockAgencyPromptSend(input: {
     providerAuth: input.providerAuth,
     frameworkMode: true,
     env: input.env,
+    selectedModel: input.selectedModel,
   })
 }
 
@@ -240,6 +266,7 @@ export function shouldBlockAgencyPromptSubmit(input: {
   mode: "normal" | "shell"
   isSlashCommand: boolean
   env?: Record<string, string | undefined>
+  selectedModel?: SelectedModel
 }) {
   if (input.mode === "shell" || input.isSlashCommand) return false
   return shouldBlockAgencyPromptSend(input)

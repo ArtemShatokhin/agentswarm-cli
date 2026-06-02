@@ -416,6 +416,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           agentModel: local.agent.current()?.model,
         }),
         env: process.env,
+        selectedModel: local.model.current(),
       })
 
     if (!needsAuth || dialog.stack.length > 0) return

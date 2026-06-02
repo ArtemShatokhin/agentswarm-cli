@@ -860,6 +860,116 @@ describe("agency session errors", () => {
     ).toBe(false)
   })
 
+  test("framework prompt blocks when selected upstream provider lacks matching credential", () => {
+    const providers: Provider[] = [
+      {
+        id: "agency-swarm",
+        name: "Agency Swarm",
+        source: "config",
+        env: [],
+        options: {},
+        models: {},
+      },
+      {
+        id: "openai",
+        name: "OpenAI",
+        source: "api",
+        env: ["OPENAI_API_KEY"],
+        key: "sk-openai",
+        options: {},
+        models: {},
+      },
+    ]
+
+    expect(
+      shouldBlockAgencyPromptSend({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers,
+        selectedModel: {
+          providerID: "google",
+          modelID: "gemini-2.5-pro",
+        },
+      }),
+    ).toBe(true)
+
+    expect(
+      shouldBlockAgencyPromptSend({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers,
+        selectedModel: {
+          providerID: "openrouter",
+          modelID: "anthropic/claude-sonnet-4.5",
+        },
+      }),
+    ).toBe(true)
+  })
+
+  test("framework prompt allows selected upstream provider with matching credential", () => {
+    expect(
+      shouldBlockAgencyPromptSend({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers: [
+          {
+            id: "agency-swarm",
+            name: "Agency Swarm",
+            source: "config",
+            env: [],
+            options: {},
+            models: {},
+          },
+          {
+            id: "openrouter",
+            name: "OpenRouter",
+            source: "api",
+            env: ["OPENROUTER_API_KEY"],
+            key: "openrouter-key",
+            options: {},
+            models: {},
+          },
+        ],
+        selectedModel: {
+          providerID: "openrouter",
+          modelID: "anthropic/claude-sonnet-4.5",
+        },
+      }),
+    ).toBe(false)
+
+    expect(
+      shouldBlockAgencyPromptSend({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers: [
+          {
+            id: "agency-swarm",
+            name: "Agency Swarm",
+            source: "config",
+            env: [],
+            options: {},
+            models: {},
+          },
+          {
+            id: "google",
+            name: "Google",
+            source: "config",
+            env: ["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+            options: {},
+            models: {},
+          },
+        ],
+        env: {
+          GEMINI_API_KEY: "gemini-key",
+        },
+        selectedModel: {
+          providerID: "google",
+          modelID: "gemini-2.5-pro",
+        },
+      }),
+    ).toBe(false)
+  })
+
   test("framework auth supports Agent Swarm upstream providers", () => {
     expect(isSupportedAgencyAuthProvider("openai")).toBe(true)
     expect(isSupportedAgencyAuthProvider("anthropic")).toBe(true)
