@@ -72,6 +72,8 @@ async function applyOpenRouterTokenPolicy(out: Record<string, unknown>) {
   if (!modelSettings || modelSettings["__openrouter_default_max_tokens"] !== true) return
 
   delete modelSettings["__openrouter_default_max_tokens"]
+  if ("max_tokens" in modelSettings) return
+
   const apiKey = asString(out["api_key"]) ?? asString(out["apiKey"])
   const freeTier = await isOpenRouterFreeTier(apiKey)
   if (freeTier) {
@@ -235,6 +237,7 @@ async function buildAuthClientConfig(
 
     if (providerID === "openrouter") {
       if (options.targetOpenRouter) payload["api_key"] = key
+      else litellmKeys["openrouter"] = key
       continue
     }
 
@@ -268,6 +271,7 @@ async function buildAuthClientConfig(
 
     if (providerID === "openrouter") {
       if (options.targetOpenRouter) payload["api_key"] = auth.key
+      else litellmKeys["openrouter"] = auth.key
       continue
     }
 
