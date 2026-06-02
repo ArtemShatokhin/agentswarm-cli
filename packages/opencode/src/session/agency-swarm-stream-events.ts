@@ -596,19 +596,65 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
     return parts
   }
 
-  const extractMessageText = (message: Record<string, unknown>) => {
+  const textKeysForItem = (itemID: string) => {
+    const prefix = `${itemID}:`
+    return Array.from(new Set([...Array.from(textBuffer.keys()), ...Array.from(textOpen.values())])).filter((key) =>
+      key.startsWith(prefix),
+    )
+  }
+
+  const hasTextForItem = (itemID: string) => textKeysForItem(itemID).length > 0
+
+  const aggregateTextForItem = (itemID: string) => {
+    const prefix = `${itemID}:`
+    const parts = textKeysForItem(itemID)
+      .map((key) => {
+        const index = Number(key.slice(prefix.length))
+        return {
+          index: Number.isFinite(index) ? index : 0,
+          text: textBuffer.get(key) || "",
+        }
+      })
+      .filter((part) => part.text)
+      .sort((a, b) => a.index - b.index)
+      .map((part) => part.text)
+    return parts.length > 0 ? parts.join("\n") : undefined
+  }
+
+  const extractMessageTextParts = (message: Record<string, unknown>) => {
     const content = Array.isArray(message["content"]) ? message["content"] : []
     return content
-      .map((entry) => {
+      .map((entry, index) => {
         const part = asRecord(entry)
-        if (!part) return ""
+        if (!part) return undefined
         const type = asString(part["type"])
-        if (type === "output_text") return asString(part["text"]) || ""
-        if (type === "refusal") return asString(part["refusal"]) || ""
-        return ""
+        const text =
+          type === "output_text"
+            ? asString(part["text"]) || ""
+            : type === "refusal"
+              ? asString(part["refusal"]) || ""
+              : ""
+        if (!text) return undefined
+        return {
+          index: asNumber(part["content_index"] ?? part["index"]) ?? index,
+          text,
+        }
       })
-      .filter(Boolean)
-      .join("\n")
+      .filter((part): part is { index: number; text: string } => part !== undefined)
+  }
+
+  const replayMessageTextParts = (message: Record<string, unknown>, itemID: string) => {
+    const parts = extractMessageTextParts(message)
+    if (parts.length === 1) {
+      const [part] = parts
+      if (aggregateTextForItem(itemID) === part.text) return []
+      return [{ ...part, index: textIndex.get(itemID) ?? part.index }]
+    }
+    if (parts.length > 1 && hasTextForItem(itemID)) {
+      return parts
+    }
+    const text = parts.map((part) => part.text).join("\n")
+    return text ? [{ index: textIndex.get(itemID) ?? 0, text }] : []
   }
 
   const toolNameFor = (callID: string) => tools.get(callID)?.tool || "tool"
@@ -799,13 +845,12 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
     if (name === "message_output_created" && itemType === "message") {
       const itemID = asString(rawItem["id"]) || lastTextItemID
       if (!itemID) return []
-      const text = extractMessageText(rawItem)
-      if (!text) return []
-      const index = textIndex.get(itemID) ?? 0
-      if (shouldSkipDuplicateAssistantText(itemID, index, text)) {
-        return []
-      }
-      return finishText(itemID, index, text, eventMeta, { source: "run_item_stream_event" })
+      return replayMessageTextParts(rawItem, itemID).flatMap((part) => {
+        if (shouldSkipDuplicateAssistantText(itemID, part.index, part.text)) {
+          return []
+        }
+        return finishText(itemID, part.index, part.text, eventMeta, { source: "run_item_stream_event" })
+      })
     }
 
     if (name !== "reasoning_item_created" || itemType !== "reasoning") {
@@ -1067,16 +1112,15 @@ export function createAgencySwarmStreamEvents(input: StreamEventsInput) {
       if (asString(message["role"]) === "assistant") await input.applyAssistantLabel(messageMeta)
       const itemID = asString(message["id"])
       if (!itemID) continue
-      const text = extractMessageText(message)
-      if (!text) continue
-      const index = textIndex.get(itemID) ?? 0
-      if (shouldSkipDuplicateAssistantText(itemID, index, text)) continue
-      parts.push(
-        ...finishText(itemID, index, text, messageMeta, {
-          source: "messages",
-          ...agentUpdatedHandoffMetadata(messageMeta.agent),
-        }),
-      )
+      for (const part of replayMessageTextParts(message, itemID)) {
+        if (shouldSkipDuplicateAssistantText(itemID, part.index, part.text)) continue
+        parts.push(
+          ...finishText(itemID, part.index, part.text, messageMeta, {
+            source: "messages",
+            ...agentUpdatedHandoffMetadata(messageMeta.agent),
+          }),
+        )
+      }
     }
 
     return parts
