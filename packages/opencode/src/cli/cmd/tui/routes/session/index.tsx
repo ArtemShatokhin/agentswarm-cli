@@ -70,7 +70,7 @@ import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
 import * as Clipboard from "../../util/clipboard"
 import { errorMessage } from "@/util/error"
-import { Toast, useToast } from "../../ui/toast"
+import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv.tsx"
 import * as Editor from "../../util/editor"
 import stripAnsi from "strip-ansi"
@@ -1193,7 +1193,6 @@ export function Session() {
               </Show>
             </box>
           </Show>
-          <Toast />
         </box>
         <Show when={sidebarVisible()}>
           <Switch>

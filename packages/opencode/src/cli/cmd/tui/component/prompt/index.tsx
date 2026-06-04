@@ -62,8 +62,10 @@ import { useKV } from "../../context/kv"
 import { createFadeIn } from "../../util/signal"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
+import { downloadOllamaModel } from "../download-ollama-model"
 import { CONSOLE_MANAGED_ICON, consoleManagedProviderLabel } from "@tui/util/provider-origin"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
+import { AgencySwarmOllama } from "@/agency-swarm/ollama"
 import { AgencySwarmRunSession } from "@/agency-swarm/run-session"
 import {
   describeAgencyAuthFailure,
@@ -1082,6 +1084,35 @@ export function Prompt(props: PromptProps) {
       promptModelWarning()
       return
     }
+    if (frameworkMode() && AgencySwarmOllama.isModel(selectedModel)) {
+      try {
+        await AgencySwarmOllama.ensure(selectedModel.modelID, {
+          onServerStart() {
+            toast.show({
+              variant: "info",
+              message: "Starting Ollama server...",
+              duration: 5000,
+            })
+          },
+        })
+      } catch (error) {
+        if (AgencySwarmOllama.isMissingModelError(error)) {
+          const downloaded = await downloadOllamaModel({
+            dialog,
+            toast,
+            modelID: selectedModel.modelID,
+          })
+          if (!downloaded) return
+        } else {
+          toast.show({
+            variant: "warning",
+            message: error instanceof Error ? error.message : String(error),
+            duration: 8000,
+          })
+          return
+        }
+      }
+    }
     const productProviderID = frameworkMode() ? AgencySwarmAdapter.PROVIDER_ID : selectedModel.providerID
 
     const currentMode = store.mode
@@ -1252,7 +1283,8 @@ export function Prompt(props: PromptProps) {
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
 
       capturePromptSubmitted("server_command", currentMode)
-      if (serverSlashCommand.source === "command") captureCommand({ category: "Prompt", source: "slash", value: command })
+      if (serverSlashCommand.source === "command")
+        captureCommand({ category: "Prompt", source: "slash", value: command })
       void sdk.client.session.command({
         sessionID,
         command: command.slice(1),

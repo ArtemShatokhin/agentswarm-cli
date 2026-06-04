@@ -1,6 +1,7 @@
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
 import { AgencySwarmHistory } from "@/agency-swarm/history"
 import { buildLitellmModelForClientConfig } from "@/agency-swarm/litellm-provider"
+import { AgencySwarmOllama } from "@/agency-swarm/ollama"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session"
 import { MessageV2 } from "@/session/message-v2"
@@ -418,9 +419,12 @@ export namespace SessionAgencySwarm {
         configuredRecipient: input.options.recipientAgent,
         configuredRecipientSelectedAt: input.options.recipientAgentSelectedAt,
       })
+      const sessionModel = input.sessionModel
       const sessionLitellmModel =
-        input.sessionModel &&
-        buildLitellmModelForClientConfig(input.sessionModel.providerID, input.sessionModel.modelID)
+        sessionModel && buildLitellmModelForClientConfig(sessionModel.providerID, sessionModel.modelID)
+      if (sessionModel?.providerID === AgencySwarmOllama.PROVIDER_ID) {
+        await AgencySwarmOllama.ensure(sessionModel.modelID)
+      }
       const clientConfig = await resolveClientConfig(
         input.options.baseURL,
         agency,

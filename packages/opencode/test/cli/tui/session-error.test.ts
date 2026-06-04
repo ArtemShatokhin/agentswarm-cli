@@ -145,6 +145,33 @@ describe("agency session errors", () => {
     ).toBe(true)
   })
 
+  test("framework mode skips provider auth when Ollama is selected", () => {
+    expect(
+      shouldOpenStartupAuthDialog({
+        frameworkMode: true,
+        currentProviderID: "ollama",
+        providers: [
+          {
+            id: "agency-swarm",
+            name: "Agency Swarm",
+            source: "config",
+            env: [],
+            options: {},
+            models: {},
+          },
+          {
+            id: "ollama",
+            name: "Ollama",
+            source: "config",
+            env: [],
+            options: {},
+            models: {},
+          },
+        ],
+      }),
+    ).toBe(false)
+  })
+
   test("framework mode skips local provider auth for remote agency-swarm backends", () => {
     expect(
       shouldOpenStartupAuthDialog({
@@ -1014,6 +1041,7 @@ describe("isAgencySupportedProvider (/models filter)", () => {
   const mixed: Provider[] = [
     { id: "gemini", name: "Gemini", source: "config", env: [], options: {}, models: {} },
     { id: "github-copilot", name: "GitHub Copilot", source: "config", env: [], options: {}, models: {} },
+    { id: "ollama", name: "Ollama", source: "config", env: [], options: {}, models: {} },
     { id: "openai", name: "OpenAI", source: "config", env: [], options: {}, models: {} },
     { id: "anthropic", name: "Anthropic", source: "config", env: [], options: {}, models: {} },
     { id: "agency-swarm", name: "Agent Swarm", source: "config", env: [], options: {}, models: {} },
@@ -1024,14 +1052,20 @@ describe("isAgencySupportedProvider (/models filter)", () => {
     return frameworkMode ? providers.filter((provider) => isAgencySupportedProvider(provider.id)) : providers
   }
 
-  test("framework mode keeps only openai, anthropic, agency-swarm", () => {
-    expect(filterForDialog(mixed, true).map((provider) => provider.id)).toEqual(["openai", "anthropic", "agency-swarm"])
+  test("framework mode keeps only local and agency-supported providers", () => {
+    expect(filterForDialog(mixed, true).map((provider) => provider.id)).toEqual([
+      "ollama",
+      "openai",
+      "anthropic",
+      "agency-swarm",
+    ])
   })
 
   test("non-framework mode passes the full provider list through", () => {
     expect(filterForDialog(mixed, false).map((provider) => provider.id)).toEqual([
       "gemini",
       "github-copilot",
+      "ollama",
       "openai",
       "anthropic",
       "agency-swarm",

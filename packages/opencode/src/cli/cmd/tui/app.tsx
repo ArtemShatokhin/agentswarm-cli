@@ -42,7 +42,7 @@ import { PromptStashProvider } from "./component/prompt/stash"
 import { AgencySwarmConnectionProvider } from "@tui/context/agency-swarm-connection"
 import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
-import { ToastProvider, useToast } from "./ui/toast"
+import { Toast, ToastProvider, useToast } from "./ui/toast"
 import { ExitProvider, useExit } from "./context/exit"
 import { Session as SessionApi } from "@/session"
 import { TuiEvent } from "./event"
@@ -56,6 +56,7 @@ import { TuiConfig } from "@/cli/cmd/tui/config/tui"
 import { createTuiApi, TuiPluginRuntime, type RouteMap } from "./plugin"
 import { FormatError, FormatUnknownError } from "@/cli/error"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
+import { AgencySwarmOllama } from "@/agency-swarm/ollama"
 import { AgencyProduct } from "@/agency-swarm/product"
 import {
   describeAgencyAuthFailure,
@@ -132,6 +133,7 @@ export function tui(input: {
     }
 
     const onBeforeExit = async () => {
+      AgencySwarmOllama.shutdown()
       await TuiPluginRuntime.dispose()
       await Telemetry.flush({ timeoutMs: 500 })
     }
@@ -415,6 +417,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           configuredModel: sync.data.config.model,
           agentModel: local.agent.current()?.model,
         }),
+        currentProviderID: local.model.current()?.providerID,
         env: process.env,
       })
 
@@ -1039,6 +1042,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         <TuiPluginRuntime.Slot name="app" />
       </Show>
       <StartupLoading ready={ready} themed={themePaintReady} />
+      <Toast />
     </box>
   )
 }

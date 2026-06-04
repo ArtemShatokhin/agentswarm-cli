@@ -49,6 +49,7 @@ import { createPerplexity } from "@ai-sdk/perplexity"
 import { createVercel } from "@ai-sdk/vercel"
 import { createVenice } from "venice-ai-sdk-provider"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
+import { AgencySwarmOllama } from "@/agency-swarm/ollama"
 import {
   createGitLab,
   VERSION as GITLAB_PROVIDER_VERSION,
@@ -1150,6 +1151,87 @@ function createAgencySwarmProvider(): Info {
   }
 }
 
+function createOllamaProvider(): Info {
+  const providerID = ProviderID.make(AgencySwarmOllama.PROVIDER_ID)
+  const names = [
+    ["gemma4:e4b", "Gemma 4 E4B"],
+    ["gemma3:4b", "Gemma 3 4B"],
+    ["gemma3:12b", "Gemma 3 12B"],
+    ["llama3.2:3b", "Llama 3.2 3B"],
+    ["llama3.1:8b", "Llama 3.1 8B"],
+    ["qwen3:4b", "Qwen 3 4B"],
+    ["qwen3:8b", "Qwen 3 8B"],
+    ["mistral:7b", "Mistral 7B"],
+    ["deepseek-r1:7b", "DeepSeek R1 7B"],
+    ["phi4-mini:3.8b", "Phi 4 Mini"],
+  ] as const
+  const models = Object.fromEntries(
+    names.map(([id, name]) => {
+      const modelID = ModelID.make(id)
+      return [
+        modelID,
+        {
+          id: modelID,
+          providerID,
+          name,
+          family: "ollama",
+          api: {
+            id: modelID,
+            url: "http://127.0.0.1:11434",
+            npm: "@ai-sdk/openai-compatible",
+          },
+          status: "active" as const,
+          headers: {},
+          options: {},
+          cost: {
+            input: 0,
+            output: 0,
+            cache: {
+              read: 0,
+              write: 0,
+            },
+          },
+          limit: {
+            context: 128_000,
+            output: 8_192,
+          },
+          capabilities: {
+            temperature: true,
+            reasoning: false,
+            attachment: false,
+            toolcall: true,
+            input: {
+              text: true,
+              audio: false,
+              image: false,
+              video: false,
+              pdf: false,
+            },
+            output: {
+              text: true,
+              audio: false,
+              image: false,
+              video: false,
+              pdf: false,
+            },
+            interleaved: false,
+          },
+          release_date: "",
+          variants: {},
+        },
+      ]
+    }),
+  )
+  return {
+    id: providerID,
+    name: "Ollama",
+    source: "config",
+    env: [],
+    options: {},
+    models,
+  }
+}
+
 const layer: Layer.Layer<
   Service,
   never,
@@ -1171,6 +1253,7 @@ const layer: Layer.Layer<
         const modelsDev = yield* Effect.promise(() => ModelsDev.get())
         const database = mapValues(modelsDev, fromModelsDevProvider)
         database[AgencySwarmAdapter.PROVIDER_ID] = createAgencySwarmProvider()
+        database[AgencySwarmOllama.PROVIDER_ID] = createOllamaProvider()
 
         const providers: Record<ProviderID, Info> = {} as Record<ProviderID, Info>
         const languages = new Map<string, LanguageModelV3>()
@@ -1393,6 +1476,17 @@ const layer: Layer.Layer<
 
         if (shouldLoadAgencySwarmProvider) {
           mergeProvider(agencySwarmProviderID, { source: "config" })
+        }
+
+        const ollamaProviderID = ProviderID.make(AgencySwarmOllama.PROVIDER_ID)
+        const shouldLoadOllamaProvider =
+          isProviderAllowed(ollamaProviderID) &&
+          !providers[ollamaProviderID] &&
+          (providers[agencySwarmProviderID] !== undefined ||
+            cfg.model === `${AgencySwarmAdapter.PROVIDER_ID}/${AgencySwarmAdapter.DEFAULT_MODEL_ID}`)
+
+        if (shouldLoadOllamaProvider) {
+          mergeProvider(ollamaProviderID, { source: "config" })
         }
 
         const gitlab = ProviderID.make("gitlab")
