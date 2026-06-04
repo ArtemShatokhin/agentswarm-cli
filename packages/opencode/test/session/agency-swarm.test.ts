@@ -1281,6 +1281,19 @@ describe("session.agency-swarm", () => {
   test("stream promotes explicit OpenRouter LiteLLM key for direct config model", async () => {
     mockHistory()
     spyOn(Auth, "all").mockImplementation(async () => ({})) as typeof Auth.all
+    spyOn(Env, "all").mockImplementation(() => ({
+      OPENROUTER_API_KEY: "env-openrouter",
+    })) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({
+      openrouter: {
+        id: "openrouter",
+        name: "OpenRouter",
+        source: "api",
+        env: ["OPENROUTER_API_KEY"],
+        options: {},
+        models: {},
+      },
+    })) as typeof Provider.list
 
     let captured: Record<string, unknown> | undefined
     AgencySwarmAdapter.streamRun = async function* (input) {
@@ -1485,8 +1498,19 @@ describe("session.agency-swarm", () => {
     })
     globalThis.fetch = keyCheck as unknown as typeof fetch
     spyOn(Auth, "all").mockImplementation(async () => ({})) as typeof Auth.all
-    spyOn(Env, "all").mockImplementation(() => ({})) as typeof Env.all
-    spyOn(Provider, "list").mockImplementation(async () => ({})) as typeof Provider.list
+    spyOn(Env, "all").mockImplementation(() => ({
+      OPENROUTER_API_KEY: "env-openrouter",
+    })) as typeof Env.all
+    spyOn(Provider, "list").mockImplementation(async () => ({
+      openrouter: {
+        id: "openrouter",
+        name: "OpenRouter",
+        source: "api",
+        env: ["OPENROUTER_API_KEY"],
+        options: {},
+        models: {},
+      },
+    })) as typeof Provider.list
     AgencySwarmAdapter.getMetadata = (async () => ({
       agency_swarm_version: "1.9.3",
       metadata: { agents: ["AgentA"] },

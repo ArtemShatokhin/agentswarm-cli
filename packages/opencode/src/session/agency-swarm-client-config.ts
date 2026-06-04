@@ -89,6 +89,20 @@ function mergeModelSettingsExtraArgs(
   return settings
 }
 
+function readOpenRouterLiteLLMKey(config: Record<string, unknown> | undefined): string | undefined {
+  const keys = asRecord(config?.["litellm_keys"]) ?? asRecord(config?.["litellmKeys"])
+  return asString(keys?.["openrouter"])
+}
+
+function hasExplicitOpenRouterCredential(config: Record<string, unknown> | undefined): boolean {
+  return !!(
+    asString(config?.["api_key"]) ??
+    asString(config?.["apiKey"]) ??
+    readOpenRouterLiteLLMKey(config) ??
+    readOpenRouterAuthorizationKey(config ?? {})
+  )
+}
+
 function promoteOpenRouterLiteLLMKey(out: Record<string, unknown>) {
   const model = asString(out["model"])
   if (!model || !isOpenRouterClientConfigModel(model)) return
@@ -270,6 +284,12 @@ export async function resolveClientConfig(
     }
   }
   delete merged["defaultHeaders"]
+
+  if (targetOpenRouter && hasExplicitOpenRouterCredential(explicit)) {
+    const key = explicitAPIKey ?? readOpenRouterLiteLLMKey(explicit)
+    if (key) merged["api_key"] = key
+    else delete merged["api_key"]
+  }
 
   return await finalizeClientConfig(merged, explicit, sessionLitellmModel, sessionModelSettingsExtraArgs)
 }
