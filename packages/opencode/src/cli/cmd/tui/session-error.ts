@@ -30,6 +30,7 @@ export function isAgencySupportedProvider(providerID: string) {
 }
 
 type ProviderAuthMap = Record<string, ProviderAuthMethod[]>
+type SelectedModel = { providerID: string; modelID?: string }
 type AuthProvider = {
   id: string
   env: string[]
@@ -159,6 +160,7 @@ function usesDirectOpenRouterRoute(input: {
   currentProviderID?: string
   configuredModel?: string
   agentModel?: { providerID: string; modelID: string }
+  selectedModel?: SelectedModel
 }) {
   const agency = input.providers.find((provider) => provider.id === AgencySwarmAdapter.PROVIDER_ID)
   const raw = agency?.options?.["clientConfig"] ?? agency?.options?.["client_config"]
@@ -168,6 +170,7 @@ function usesDirectOpenRouterRoute(input: {
   }
   if (isOpenRouterClientConfigModel(input.configuredModel)) return true
   if (input.agentModel?.providerID === "openrouter") return true
+  if (input.selectedModel?.providerID === "openrouter") return true
   return input.currentProviderID === "openrouter"
 }
 
@@ -201,6 +204,7 @@ export function shouldOpenStartupAuthDialog(input: {
   currentProviderID?: string
   configuredModel?: string
   agentModel?: { providerID: string; modelID: string }
+  selectedModel?: SelectedModel
   /** Override for the upstream-credential forwarding path; when undefined the value is inferred from env + provider options. */
   forwardUpstreamCredentials?: boolean
   /** Process env snapshot; production callers pass `process.env`, tests pass a controlled map. */
@@ -224,18 +228,14 @@ export function shouldOpenStartupAuthDialog(input: {
 
   if (!forwardingActive && !usesLocalAgencyProviderAuth(input.providers)) return false
 
-  return !hasSupportedAgencyCredential(
-    input.providers,
-    input.providerAuth,
-    env,
-    directOpenRouter,
-  )
+  return !hasSupportedAgencyCredential(input.providers, input.providerAuth, env, directOpenRouter)
 }
 
 export function shouldBlockAgencyPromptSend(input: {
   currentProviderID?: string
   configuredModel?: string
   agentModel?: { providerID: string; modelID: string }
+  selectedModel?: SelectedModel
   providers: Provider[]
   providerAuth?: ProviderAuthMap
   env?: Record<string, string | undefined>
@@ -248,6 +248,7 @@ export function shouldBlockAgencyPromptSend(input: {
     currentProviderID: input.currentProviderID,
     configuredModel: input.configuredModel,
     agentModel: input.agentModel,
+    selectedModel: input.selectedModel,
     env: input.env,
   })
 }
@@ -256,6 +257,7 @@ export function shouldBlockAgencyPromptSubmit(input: {
   currentProviderID?: string
   configuredModel?: string
   agentModel?: { providerID: string; modelID: string }
+  selectedModel?: SelectedModel
   providers: Provider[]
   providerAuth?: ProviderAuthMap
   mode: "normal" | "shell"

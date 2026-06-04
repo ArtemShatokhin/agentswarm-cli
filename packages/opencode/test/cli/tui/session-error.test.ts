@@ -377,6 +377,56 @@ describe("agency session errors", () => {
     ).toBe(true)
   })
 
+  test("framework prompt blocks selected OpenRouter model without OpenRouter credentials", () => {
+    const providers = [
+      {
+        id: "agency-swarm",
+        name: "Agency Swarm",
+        source: "config",
+        env: [],
+        options: {},
+        models: {},
+      },
+    ] satisfies Provider[]
+
+    expect(
+      shouldBlockAgencyPromptSubmit({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers,
+        env: { OPENAI_API_KEY: "sk-openai-env" },
+        selectedModel: { providerID: "openrouter", modelID: "anthropic/claude-sonnet-4.5" },
+        mode: "normal",
+        isSlashCommand: false,
+      }),
+    ).toBe(true)
+  })
+
+  test("framework prompt allows selected OpenRouter model with OpenRouter credentials", () => {
+    const providers = [
+      {
+        id: "agency-swarm",
+        name: "Agency Swarm",
+        source: "config",
+        env: [],
+        options: {},
+        models: {},
+      },
+    ] satisfies Provider[]
+
+    expect(
+      shouldBlockAgencyPromptSubmit({
+        currentProviderID: "agency-swarm",
+        configuredModel: "agency-swarm/default",
+        providers,
+        env: { OPENROUTER_API_KEY: "sk-openrouter-env" },
+        selectedModel: { providerID: "openrouter", modelID: "anthropic/claude-sonnet-4.5" },
+        mode: "normal",
+        isSlashCommand: false,
+      }),
+    ).toBe(false)
+  })
+
   test("framework mode skips auth from OpenAI env even when OpenAI provider is filtered out", () => {
     // Mirrors SessionAgencySwarm.buildAuthClientConfig()'s direct OPENAI_API_KEY read:
     // the bridge can authenticate via env even when openai is not in the enabled provider list.
