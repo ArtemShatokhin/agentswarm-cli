@@ -252,6 +252,57 @@ describe("agency target options", () => {
     })
   })
 
+  test("restores top-level handoff over later top-level SendMessage output", () => {
+    expect(
+      resolveAgencyHandoffRecipientFromMessages({
+        frameworkMode: true,
+        agency: "my-agency",
+        currentRecipient: "UserSupportAgent",
+        currentRecipientSelectedAt: 1,
+        sessionID: "session_1",
+        messages: [
+          {
+            id: "message_1",
+            role: "assistant",
+            providerID: "agency-swarm",
+            agent: "MathAgent",
+            time: {
+              completed: 2,
+            },
+          },
+        ],
+        partsByMessage: {
+          message_1: [
+            {
+              type: "tool",
+              tool: "transfer_to_SupportAgent",
+              state: {
+                status: "completed",
+                output: '{"assistant":"SupportAgent"}',
+              },
+            },
+            {
+              type: "tool",
+              tool: "SendMessage",
+              state: {
+                status: "completed",
+                output: '{"assistant":"MathAgent"}',
+                metadata: {
+                  item_type: "function_call_output",
+                },
+              },
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      sessionID: "session_1",
+      messageID: "message_1",
+      agent: "SupportAgent",
+      selectedAt: 1,
+    })
+  })
+
   test("restores handed off recipient from synced session messages", () => {
     expect(
       resolveAgencyHandoffRecipientFromMessages({
