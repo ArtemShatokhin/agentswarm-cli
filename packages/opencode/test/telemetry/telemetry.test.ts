@@ -187,7 +187,8 @@ async function buildRunnerUnlocked(input: RunnerInput) {
       `}`,
     ].join("\n"),
   )
-  const proc = Bun.spawn([process.execPath, builder], {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, builder],
     cwd: root,
     env: Object.fromEntries(
       Object.entries({ PATH: process.env.PATH }).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -195,11 +196,9 @@ async function buildRunnerUnlocked(input: RunnerInput) {
     stdout: "pipe",
     stderr: "pipe",
   })
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
+  const stdout = proc.stdout.toString()
+  const stderr = proc.stderr.toString()
+  const code = proc.exitCode
   if (code !== 0) throw new Error(stderr || stdout)
   return path.join(outdir, "telemetry-runner.js")
 }
@@ -227,17 +226,16 @@ async function runCompiledTelemetry(input: RunnerInput) {
   const env = Object.fromEntries(
     Object.entries(baseEnv).filter((entry): entry is [string, string] => entry[1] !== undefined),
   )
-  const proc = Bun.spawn([process.execPath, runner, payload], {
+  const proc = Bun.spawnSync({
+    cmd: [process.execPath, runner, payload],
     cwd: path.resolve(import.meta.dir, "../.."),
     env,
     stdout: "pipe",
     stderr: "pipe",
   })
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
+  const stdout = proc.stdout.toString()
+  const stderr = proc.stderr.toString()
+  const code = proc.exitCode
 
   expect(stderr).toBe("")
   expect(code).toBe(0)
