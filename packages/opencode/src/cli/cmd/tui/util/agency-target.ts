@@ -3,6 +3,8 @@ import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
 import {
   hasAgencyHandoffEvidence,
   isAgencyAgentUpdatedHandoffMetadata,
+  isAgencyHandoffOutputMetadata,
+  isAgencyHandoffToolName,
   isTopLevelAgencyHandoffMetadata,
 } from "@/session/agency-swarm-utils"
 import * as Locale from "@/util/locale"
@@ -300,7 +302,11 @@ export function resolveAgencyHandoffRecipientFromParts(parts: AgencyHandoffPart[
     if (metadataAgent) return metadataAgent
     if (part.type !== "tool") continue
     const outputAgent =
-      isTopLevelAgencyHandoffMetadata(partMetadata) && isTopLevelAgencyHandoffMetadata(stateMetadata)
+      isTopLevelAgencyHandoffMetadata(partMetadata) &&
+      isTopLevelAgencyHandoffMetadata(stateMetadata) &&
+      (isAgencyHandoffOutputMetadata(partMetadata) ||
+        isAgencyHandoffOutputMetadata(stateMetadata) ||
+        isAgencyHandoffToolName(part.tool))
         ? (readHandoffOutputAgent(part.state?.output) ?? readHandoffMetadataAgent(stateMetadata))
         : undefined
     if (outputAgent) return outputAgent

@@ -106,7 +106,7 @@ export function isTopLevelAgencyHandoffMetadata(metadata: Record<string, unknown
   return !hasCallerAgentMarker(metadata["callerAgent"] ?? metadata["caller_agent"] ?? metadata["caller"])
 }
 
-function isAgencyHandoffOutputMetadata(metadata: Record<string, unknown> | undefined) {
+export function isAgencyHandoffOutputMetadata(metadata: Record<string, unknown> | undefined) {
   return (
     asString(metadata?.["type"]) === "handoff_output_item" ||
     asString(metadata?.["item_type"]) === "handoff_output_item"

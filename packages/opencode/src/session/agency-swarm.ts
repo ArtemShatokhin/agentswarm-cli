@@ -39,6 +39,8 @@ import {
   findRecipientAgent,
   hasAgencyHandoffEvidence,
   isAgencyAgentUpdatedHandoffMetadata,
+  isAgencyHandoffOutputMetadata,
+  isAgencyHandoffToolName,
   isTopLevelAgencyHandoffMetadata,
   normalizeCallerAgent as normalizeCallerAgentValue,
   type AgencyMessageInput,
@@ -995,6 +997,9 @@ export namespace SessionAgencySwarm {
       const outputAgent =
         isTopLevelAgencyHandoffMetadata(partMetadata) &&
         isTopLevelAgencyHandoffMetadata(stateMetadata) &&
+        (isAgencyHandoffOutputMetadata(partMetadata) ||
+          isAgencyHandoffOutputMetadata(stateMetadata) ||
+          isAgencyHandoffToolName(part.tool)) &&
         part.state.status === "completed"
           ? (readHandoffOutputAgent(part.state.output) ?? readHandoffMetadataAgent(stateMetadata))
           : undefined
