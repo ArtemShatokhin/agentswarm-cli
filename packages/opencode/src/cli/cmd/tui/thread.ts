@@ -180,6 +180,16 @@ export const TuiThreadCommand = cmd({
       if (prepared?.runProjectDirectory) {
         process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = Filesystem.resolve(prepared.runProjectDirectory)
       }
+      if (prepared?.pendingRunProjectDirectory) {
+        process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = Filesystem.resolve(
+          prepared.pendingRunProjectDirectory,
+        )
+      }
+      if (prepared?.pendingRunPythonCommand) {
+        process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(
+          prepared.pendingRunPythonCommand,
+        )
+      }
       const next = prepared?.directory ? Filesystem.resolve(prepared.directory) : selectedProject
       const file = await target()
       try {
@@ -298,6 +308,8 @@ export const TuiThreadCommand = cmd({
             agent: args.agent,
             model: args.model,
             prompt,
+            productMode: prepared?.productMode,
+            startupFailure: prepared?.startupFailure,
             fork: args.fork,
           },
         })

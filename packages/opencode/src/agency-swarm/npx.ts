@@ -64,6 +64,10 @@ export interface PreparedNpxLaunch {
   directory: string
   configContent?: string
   runProjectDirectory?: string
+  pendingRunProjectDirectory?: string
+  pendingRunPythonCommand?: string[]
+  productMode?: "build"
+  startupFailure?: string
   cleanup?: () => Promise<void>
 }
 
@@ -491,7 +495,11 @@ function isLoopbackBaseURL(baseURL: string) {
 }
 
 export function buildAgencyConfig(input: { baseURL: string; agency: string; token?: string }) {
-  return JSON.stringify({
+  return JSON.stringify(buildAgencyConfigData(input))
+}
+
+export function buildAgencyConfigData(input: { baseURL: string; agency: string; token?: string }) {
+  return {
     $schema: "https://opencode.ai/config.json",
     model: `${AgencySwarmAdapter.PROVIDER_ID}/${AgencySwarmAdapter.DEFAULT_MODEL_ID}`,
     provider: {
@@ -501,12 +509,12 @@ export function buildAgencyConfig(input: { baseURL: string; agency: string; toke
           baseURL: input.baseURL,
           agency: input.agency,
           discoveryTimeoutMs: 2000,
-          timeout: false,
+          timeout: false as const,
           ...(input.token ? { token: input.token } : {}),
         },
       },
     },
-  })
+  }
 }
 
 export function buildPythonEnv(directory: string, env: NodeJS.ProcessEnv = process.env) {
@@ -1032,7 +1040,24 @@ export async function prepareProjectLaunch(
       `${profile.name} ready`,
       `${profile.name} start failed`,
       (signal) => startProjectServer(project.directory, python, project.moduleName, project.agencyFile, signal),
-    )
+    ).catch((error) => {
+      if (isStartupCancelledError(error)) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      if (!isAgencyProjectStartupFailure(message)) throw error
+      prompts.log.warn(`Opening Build so you can fix this project.`)
+      return {
+        failure: message,
+      }
+    })
+    if ("failure" in server) {
+      return {
+        directory: project.directory,
+        pendingRunProjectDirectory: project.directory,
+        pendingRunPythonCommand: python,
+        productMode: "build",
+        startupFailure: server.failure,
+      }
+    }
     return {
       directory: project.directory,
       runProjectDirectory: project.directory,
@@ -1046,6 +1071,51 @@ export async function prepareProjectLaunch(
     if (isStartupCancelledError(error)) return
     throw error
   }
+}
+
+let localRunLaunch:
+  | {
+      directory: string
+      config: ReturnType<typeof buildAgencyConfigData>
+      cleanup: () => Promise<void>
+    }
+  | undefined
+
+export async function prepareLocalProjectRunLaunch(
+  directory: string,
+  profile: ProductProfile = AgencyProduct,
+  python?: string[],
+): Promise<{ directory: string; runProjectDirectory: string; config: ReturnType<typeof buildAgencyConfigData> }> {
+  const project = await detectAgencyProject(directory, profile)
+  if (!project) throw new Error(`No ${profile.name} project found in ${directory}`)
+
+  const resolved = Filesystem.resolve(project.directory)
+  await cleanupLocalProjectRunLaunch()
+  const command = python ?? [getVenvPythonPath(project.directory)]
+  if (!python && !existsSync(command[0] ?? "")) {
+    throw new Error(`Project .venv is not ready. Use Build to repair it, then switch to Run again.`)
+  }
+  const server = await startProjectServer(project.directory, command, project.moduleName, project.agencyFile)
+  const config = buildAgencyConfigData({
+    baseURL: server.baseURL,
+    agency: LOCAL_AGENCY_ID,
+  })
+  localRunLaunch = {
+    directory: resolved,
+    config,
+    cleanup: server.cleanup,
+  }
+  return {
+    directory: project.directory,
+    runProjectDirectory: project.directory,
+    config,
+  }
+}
+
+export async function cleanupLocalProjectRunLaunch() {
+  const launch = localRunLaunch
+  localRunLaunch = undefined
+  await launch?.cleanup()
 }
 
 async function ensureProjectPython(
@@ -1746,29 +1816,49 @@ function formatAgencyProjectStartupFailure(stderr: string, entryFile: string) {
   const exception = summarizePythonTraceback(stderr)
   if (!exception) return
   const frame = findProjectEntryFrame(stderr, entryFile)
+  if (!frame) return
   const importFailure = /^(?:[\w.]+\.)?(?:ImportError|ModuleNotFoundError):/.test(exception)
   const title = importFailure ? "Your agency project could not load." : "Your agency project failed to start."
   const entryName = path.basename(entryFile)
-  const location = frame ? `\nAt: ${entryName}:${frame.line}${frame.source ? `\n${frame.source}` : ""}` : ""
+  const location = `\nAt: ${entryName}:${frame.line}${frame.source ? `\n${frame.source}` : ""}`
   const recovery = importFailure
-    ? `Fix the missing import or dependency in this project, then run ${AgencyProduct.cmd} again.`
-    : `Fix the error above, then run ${AgencyProduct.cmd} again.`
+    ? "Fix the missing import or dependency in Build, then switch to Run."
+    : "Fix the error above in Build, then switch to Run."
   return `${title}\n${exception}${location}\n${recovery}`
+}
+
+function isAgencyProjectStartupFailure(message: string) {
+  return (
+    message.startsWith("Your agency project could not load.") ||
+    message.startsWith("Your agency project failed to start.")
+  )
 }
 
 function findProjectEntryFrame(stderr: string, entryFile: string) {
   const lines = stderr.split(/\r?\n/)
-  const resolvedEntryFile = path.resolve(entryFile)
+  const resolvedEntryFiles = equivalentResolvedPaths(entryFile)
   const entryName = escapeRegExp(path.basename(entryFile))
   for (let index = lines.length - 1; index >= 0; index--) {
     const match = lines[index]?.match(new RegExp(`^\\s*File "([^"]*${entryName})", line (\\d+),`))
     if (!match) continue
-    if (path.resolve(match[1] ?? "") !== resolvedEntryFile) continue
+    if (!resolvedEntryFiles.has(path.resolve(match[1] ?? ""))) continue
     return {
       line: match[2] ?? "?",
       source: lines[index + 1]?.trim(),
     }
   }
+}
+
+function equivalentResolvedPaths(file: string) {
+  const resolved = path.resolve(file)
+  const values = new Set([resolved])
+  if (process.platform === "darwin" && resolved.startsWith("/var/")) {
+    values.add(`/private${resolved}`)
+  }
+  if (process.platform === "darwin" && resolved.startsWith("/private/var/")) {
+    values.add(resolved.slice("/private".length))
+  }
+  return values
 }
 
 function escapeRegExp(value: string) {

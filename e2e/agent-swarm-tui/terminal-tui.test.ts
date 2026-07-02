@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -32,6 +32,7 @@ const tempDirs: string[] = []
 const tuiReadyTimeoutMs = process.env.CI ? 120_000 : 30_000
 const tuiInteractionTimeoutMs = process.env.CI ? 60_000 : 45_000
 const livePostHogTest = process.env.AGENTSWARM_LIVE_POSTHOG_E2E === "1" ? test : test.skip
+const unixTest = process.platform === "win32" ? test.skip : test
 const fakePostHogKeyFragments = ["dummy", "example", "fake", "not-a-live-key", "ph_test"]
 
 async function waitForConfiguredDemoRecipient(tui: TuiProcess) {
@@ -141,6 +142,25 @@ function nativeOpenAIOnlyConfig(baseURL: string) {
   }
 }
 
+function nativeOpenAIWithStaleAgencyConfig(baseURL: string) {
+  return {
+    ...nativeOpenAIOnlyConfig(baseURL),
+    enabled_providers: ["openai", "agency-swarm"],
+    provider: {
+      ...nativeOpenAIOnlyConfig(baseURL).provider,
+      "agency-swarm": {
+        name: "Agency Swarm",
+        options: {
+          baseURL: "http://127.0.0.1:9",
+          agency: "stale-agency",
+          discoveryTimeoutMs: 100,
+          timeout: false as const,
+        },
+      },
+    },
+  }
+}
+
 async function waitForModelOption(tui: TuiProcess, model: string) {
   await tui.waitFor(
     () =>
@@ -159,6 +179,49 @@ async function findOpenCodeDatabase(dataHome: string) {
   const db = entries.find((entry) => /^opencode(?:-.+)?\.db$/.test(entry))
   if (!db) throw new Error(`No opencode database found in ${dir}`)
   return path.join(dir, db)
+}
+
+async function waitForLocalRunSession(stateHome: string, directory: string) {
+  const file = path.join(stateHome, "agentswarm", "agency-swarm-run-sessions.json")
+  const directories = equivalentResolvedTestPaths(directory)
+  const deadline = Date.now() + tuiInteractionTimeoutMs
+  while (Date.now() < deadline) {
+    if (await Bun.file(file).exists()) {
+      const data = JSON.parse(await readFile(file, "utf8")) as Record<string, { mode?: string; directory?: string }>
+      if (
+        Object.values(data).some((item) => {
+          return item.mode === "local-project" && directories.has(path.resolve(item.directory ?? ""))
+        })
+      ) {
+        return
+      }
+    }
+    await Bun.sleep(100)
+  }
+  throw new Error(`No local Run session recorded for ${directory}`)
+}
+
+async function expectNoLocalRunSession(stateHome: string, directory: string) {
+  const file = path.join(stateHome, "agentswarm", "agency-swarm-run-sessions.json")
+  if (!(await Bun.file(file).exists())) return
+  const directories = equivalentResolvedTestPaths(directory)
+  const data = JSON.parse(await readFile(file, "utf8")) as Record<string, { mode?: string; directory?: string }>
+  const match = Object.values(data).find((item) => {
+    return item.mode === "local-project" && directories.has(path.resolve(item.directory ?? ""))
+  })
+  expect(match).toBeUndefined()
+}
+
+function equivalentResolvedTestPaths(file: string) {
+  const resolved = path.resolve(file)
+  const values = new Set([resolved])
+  if (process.platform === "darwin" && resolved.startsWith("/var/")) {
+    values.add(`/private${resolved}`)
+  }
+  if (process.platform === "darwin" && resolved.startsWith("/private/var/")) {
+    values.add(resolved.slice("/private".length))
+  }
+  return values
 }
 
 function stripAgencySwarmBridgeMetadata(dbPath: string) {
@@ -377,6 +440,117 @@ describe("Agent Swarm terminal TUI e2e", () => {
     expect(screen).toContain("Connect to a running Agent Swarm")
     expect(screen).toContain("Cancel")
     expect(screen).not.toContain("Create a new Agent Swarm project")
+  })
+
+  unixTest(
+    "launcher opens Build after startup failure and restarts repaired local Run from stale env config",
+    async () => {
+      const project = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-fallback-"))
+      const stateHome = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-fallback-state-"))
+      tempDirs.push(project, stateHome)
+      await writeAgencyProject(project)
+      await writeBrokenLaunchVenvPython(project)
+      currentNativeServer = await startNativeLLMServer()
+
+      currentTui = await startTui({
+        cwd: packageRoot,
+        env: {
+          AGENTSWARM_LAUNCHER: "1",
+          OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)),
+          XDG_STATE_HOME: stateHome,
+        },
+        args: [project],
+      })
+
+      await currentTui.waitForText("Use detected Agent Swarm project", tuiInteractionTimeoutMs)
+      currentTui.write("\r")
+      await currentTui.waitForText("Opening Build so you can fix this project.", tuiInteractionTimeoutMs)
+      await currentTui.waitFor(
+        () => footerHasMode(currentTui!.screen(), "Build"),
+        "Build fallback footer",
+        tuiReadyTimeoutMs,
+      )
+      await currentTui.waitForText("Your agency project could not load.", tuiInteractionTimeoutMs)
+      await currentTui.waitForText("ModuleNotFoundError", tuiInteractionTimeoutMs)
+      expect(currentTui.history()).toContain("No module named 'dotenv_missing'")
+      expect(currentTui.history()).not.toContain("then run agentswarm again")
+
+      currentTui.write("\r")
+      const request = await waitForNativeLLMRequest(currentTui, currentNativeServer, "dotenv_missing")
+      const body = nativeRequestBody(request)
+      expect(body).toContain("Fix this Agent Swarm startup error")
+      expect(body).toContain("Agent Swarm Build Instructions")
+      expect(body).not.toContain("Agent Swarm Planner Instructions")
+      await expectNoLocalRunSession(stateHome, project)
+
+      await markBrokenLaunchFixed(project)
+      await writeRunVersion(project, "first repaired local run response")
+      await selectProductMode(currentTui, "Run")
+      currentTui.write("try fixed swarm from startup fallback\r")
+      await currentTui.waitForText("first repaired local run response", tuiInteractionTimeoutMs)
+      await waitForLocalRunSession(stateHome, project)
+
+      await selectProductMode(currentTui, "Build")
+      await writeRunVersion(project, "second repaired local run response")
+      await selectProductMode(currentTui, "Run")
+      currentTui.write("try fixed swarm after second repair\r")
+      await currentTui.waitForText("second repaired local run response", tuiInteractionTimeoutMs)
+      await waitForLocalRunSession(stateHome, project)
+    },
+  )
+
+  unixTest("external /connect from Build fallback is not overwritten by pending local Run startup", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-connect-fallback-"))
+    const stateHome = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-connect-state-"))
+    tempDirs.push(project, stateHome)
+    await writeAgencyProject(project)
+    await writeBrokenLaunchVenvPython(project)
+    currentNativeServer = await startNativeLLMServer()
+    currentServer = await startAgencyProtocolServer()
+
+    currentTui = await startTui({
+      cwd: packageRoot,
+      env: {
+        AGENTSWARM_LAUNCHER: "1",
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)),
+        XDG_STATE_HOME: stateHome,
+      },
+      args: [project],
+    })
+
+    await currentTui.waitForText("Use detected Agent Swarm project", tuiInteractionTimeoutMs)
+    currentTui.write("\r")
+    await currentTui.waitFor(
+      () => footerHasMode(currentTui!.screen(), "Build"),
+      "Build fallback footer",
+      tuiReadyTimeoutMs,
+    )
+    await currentTui.waitForText("Your agency project could not load.", tuiInteractionTimeoutMs)
+
+    currentTui.write("\r")
+    await waitForNativeLLMRequest(currentTui, currentNativeServer, "dotenv_missing")
+    await currentTui.waitForText("native-mode-ok", tuiInteractionTimeoutMs)
+    await expectNoLocalRunSession(stateHome, project)
+
+    clearPrompt(currentTui)
+    currentTui.write("/connect")
+    await currentTui.waitForText("/connect", tuiInteractionTimeoutMs)
+    currentTui.write("\r")
+    await currentTui.waitForText("Add local port", tuiInteractionTimeoutMs)
+    await currentTui.waitForText("Unavailable - current", tuiInteractionTimeoutMs)
+    currentTui.write("\x1b[B\r")
+    await currentTui.waitForText("Add local Agency port", tuiInteractionTimeoutMs)
+    currentTui.write(`${new URL(currentServer.baseURL).port}\r`)
+    await currentTui.waitForText(`Connected to ${currentServer.baseURL}`, tuiInteractionTimeoutMs)
+
+    await selectProductMode(currentTui, "Run")
+    currentTui.write("external connected fallback run\r")
+    await currentTui.waitFor(
+      () => currentServer!.requests.some((request) => request.body.message === "external connected fallback run"),
+      "external connected fallback Run request",
+      tuiInteractionTimeoutMs,
+    )
+    await expectNoLocalRunSession(stateHome, project)
   })
 
   test("launcher uses Agent Swarm connect copy without stale hints", async () => {
@@ -875,6 +1049,51 @@ describe("Agent Swarm terminal TUI e2e", () => {
     expect(body).toContain("plan_exit")
     expect(body).not.toContain("Agent Swarm Build Instructions")
     expect(currentServer.requests).toHaveLength(0)
+  })
+
+  test("/agents preserves a selected native agent outside Run", async () => {
+    const prompt = "native reviewer stays selected"
+    currentNativeServer = await startNativeLLMServer()
+    currentTui = await startTui({
+      args: ["--agent", "reviewer"],
+      configSource: "file",
+      configContent: JSON.stringify({
+        ...nativeOpenAIOnlyConfig(currentNativeServer.baseURL),
+        agent: {
+          reviewer: {
+            mode: "primary",
+            description: "Native reviewer",
+            model: latestOpenAITestModel,
+            prompt: "Native reviewer instructions.",
+          },
+        },
+      }),
+    })
+
+    await currentTui.waitFor(
+      () => footerHasAgent(currentTui!.screen(), "Reviewer"),
+      "Reviewer footer",
+      tuiReadyTimeoutMs,
+    )
+    currentTui.write("/agents\r")
+    await currentTui.waitForText("Select agent", tuiInteractionTimeoutMs)
+    const screen = await currentTui.waitForText("Reviewer", tuiInteractionTimeoutMs)
+    expect(screen).toContain("Select agent")
+
+    currentTui.write("\r")
+    await currentTui.waitFor(
+      () => !currentTui!.screen().includes("Select agent"),
+      "native reviewer selection kept",
+      tuiInteractionTimeoutMs,
+    )
+    expect(footerHasAgent(currentTui.screen(), "Reviewer")).toBe(true)
+
+    currentTui.write(`${prompt}\r`)
+    await currentTui.waitForText("native-mode-ok", tuiInteractionTimeoutMs)
+    const request = await waitForNativeLLMRequest(currentTui, currentNativeServer, prompt)
+    const body = JSON.stringify(request.body)
+    expect(body).toContain("Native reviewer instructions.")
+    expect(body).not.toContain("Agent Swarm Build Instructions")
   })
 
   test("Build task tool calls stay native when launcher-style env config defaults to Run", async () => {
@@ -2854,6 +3073,82 @@ async function dismissAgencyConnectDialog(tui: TuiProcess) {
     "dismissed Agency connect dialog",
     tuiInteractionTimeoutMs,
   )
+}
+
+async function writeBrokenLaunchVenvPython(dir: string) {
+  const python = path.join(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", "python")
+  const fixed = path.join(dir, ".fixed")
+  const server = path.join(dir, "fake-agency-server.js")
+  await mkdir(path.dirname(python), { recursive: true })
+  const entry = path.join(dir, "agency.py")
+  await writeFile(
+    server,
+    [
+      "const port = Number(process.argv[2] ?? process.argv[1])",
+      "const response = (await Bun.file('.run-version').text().catch(() => 'startup fallback local run response')).trim()",
+      "Bun.serve({",
+      "  hostname: '127.0.0.1',",
+      "  port,",
+      "  async fetch(request) {",
+      "    const url = new URL(request.url)",
+      "    if (url.pathname === '/openapi.json') {",
+      "      return Response.json({ openapi: '3.1.0', paths: { '/local-agency/get_metadata': { get: {} }, '/local-agency/get_response_stream': { post: {} }, '/local-agency/cancel_response_stream': { post: {} } } })",
+      "    }",
+      "    if (url.pathname === '/local-agency/get_metadata') {",
+      "      return Response.json({ agency_swarm_version: '1.9.6', metadata: { agencyName: 'Startup Fallback Agency', agents: ['entry-agent'], entryPoints: ['entry-agent'] }, nodes: [{ id: 'entry-agent', type: 'agent', data: { label: 'Entry Agent', description: 'Primary route', isEntryPoint: true, model: 'gpt-4o-mini' } }] })",
+      "    }",
+      "    if (url.pathname === '/local-agency/get_response_stream') {",
+      "      const body = await request.json().catch(() => ({}))",
+      "      const text = typeof body.message === 'string' ? body.message : ''",
+      '      return new Response(`event: meta\\ndata: {\\"run_id\\":\\"run_startup_fallback\\"}\\n\\nevent: messages\\ndata: {\\"new_messages\\":[{\\"id\\":\\"msg_startup_fallback\\",\\"type\\":\\"message\\",\\"role\\":\\"assistant\\",\\"agent\\":\\"entry-agent\\",\\"content\\":[{\\"type\\":\\"output_text\\",\\"text\\":\\"${response}: ${text}\\"}]}]}\\n\\nevent: end\\ndata: {}\\n\\n`, { headers: { \'Content-Type\': \'text/event-stream\', \'Cache-Control\': \'no-cache\' } })',
+      "    }",
+      "    if (url.pathname === '/local-agency/cancel_response_stream') return Response.json({ cancelled: true })",
+      "    return new Response('not found', { status: 404 })",
+      "  },",
+      "})",
+      "await new Promise(() => {})",
+      "",
+    ].join("\n"),
+  )
+  await writeFile(
+    python,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'if [[ "${1:-}" == "-c" ]]; then',
+      '  if [[ "${2:-}" == *"print(sys.executable)"* ]]; then',
+      '    printf "%s\\n3.12.7\\n" "$0"',
+      "    exit 0",
+      "  fi",
+      "  exit 0",
+      "fi",
+      'if [[ "${1:-}" == *"launch_agency.py" ]]; then',
+      `  if [[ -f "${fixed}" ]]; then`,
+      `    exec bun "${server}" "\${2:-0}"`,
+      "  fi",
+      "  cat >&2 <<'TRACE'",
+      "Traceback (most recent call last):",
+      '  File "/tmp/agentswarm-npx-test/launch_agency.py", line 1, in <module>',
+      "    from agency import create_agency",
+      `  File "${entry}", line 1, in <module>`,
+      "    from dotenv_missing import load_dotenv",
+      "ModuleNotFoundError: No module named 'dotenv_missing'",
+      "TRACE",
+      "  exit 1",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  )
+  await chmod(python, 0o755)
+}
+
+async function markBrokenLaunchFixed(dir: string) {
+  await writeFile(path.join(dir, ".fixed"), "fixed\n")
+}
+
+async function writeRunVersion(dir: string, version: string) {
+  await writeFile(path.join(dir, ".run-version"), `${version}\n`)
 }
 
 async function selectCurrentSwarm(tui: TuiProcess) {

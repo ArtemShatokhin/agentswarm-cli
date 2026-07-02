@@ -61,7 +61,7 @@ For each failure scenario, capture the visible user result and cite the matching
 - **Happy-path proof:** Launcher-managed `agency-swarm[fastapi,litellm]` is used only when no manifest exists.
 - **Happy-path proof:** Local `.venv` uv is used for launcher-managed fallback installs into `.venv`.
 - **Failure scenarios to test:** Missing Python 3.12+ produces a visible launcher failure.
-- **Failure scenarios to test:** Failed imports produce a visible launcher failure.
+- **Failure scenarios to test:** Failed project imports after the Python environment is ready open Build instead of exiting, prefill the startup error, and let the user start Run from the same project after the fix.
 - **Failure scenarios to test:** An unreadable existing `agency.py` shows `Could not read agency.py. Make sure the project files are downloaded and readable, then try again.` and offers only `Try again`, `Connect to a running Agent Swarm`, and `Cancel`.
 - **Failure scenarios to test:** uv install or repair failure produces a visible launcher failure.
 - **Failure scenarios to test:** Dependency setup failure produces a visible launcher failure.
@@ -230,6 +230,10 @@ For each failure scenario, capture the visible user result and cite the matching
 - **Happy-path proof:** Redo restore affordances stay hidden when the reverted turn or next redo target belongs to Run, while native Build redo stays available for native Build turns.
 - **User story:** After changing or repairing a swarm in Build, the user can return to Run in the same project and confirm the fixed swarm works.
 - **Success looks like:** Run uses the repaired swarm and gives a good response instead of staying on the earlier broken behavior.
+- **User story:** When restarting a project fails because the swarm code cannot import or start, the user lands in Build with the error already in the prompt.
+- **Success looks like:** The user can submit that prompt to Build, fix the code, choose Run from `/agents`, and start the same project as the Run server.
+- **Success looks like:** A stale env-provided Agency Swarm server config cannot override the repaired local project when the user returns to Run.
+- **Success looks like:** If the user connects to another running server from that Build fallback, Run uses that connected server instead of silently replacing it.
 - **User story:** When a Run attempt shows the swarm needs work, the user can switch to Build, make the fix, return to Run, and try again.
 - **Success looks like:** The failed Run attempt does not trap the user; the next Run uses the fixed swarm and succeeds.
 - **Failure scenarios to test:** Server failure in Run still lets the user switch to Build or Plan in the same project, make a plan or build a fix, then return to Run.

@@ -12,7 +12,9 @@ import {
   formatProjectLabel,
   LAUNCHER_ENTRY_ENV,
   prepareProjectLaunch,
+  cleanupLocalProjectRunLaunch,
   prepareNpxLaunch,
+  prepareLocalProjectRunLaunch,
   PRODUCT_STATE_ROOT_ENV,
   resolveLauncherCommand,
   resolveNpxAutoProject,
@@ -2518,6 +2520,7 @@ describe("agency-swarm npx onboarding", () => {
     )
 
     const info = spyOn(prompts.log, "info").mockImplementation(() => undefined as never)
+    const warn = spyOn(prompts.log, "warn").mockImplementation(() => undefined as never)
     const success = spyOn(prompts.log, "success").mockImplementation(() => undefined as never)
     const traceback = [
       "Traceback (most recent call last):",
@@ -2569,21 +2572,134 @@ describe("agency-swarm npx onboarding", () => {
       directory: dir.path,
       agencyFile: path.join(dir.path, "agency.py"),
       moduleName: "agency",
-    }).catch((error) => error)
+    })
 
-    expect(outcome).toBeInstanceOf(Error)
-    if (!(outcome instanceof Error)) throw new Error("Expected prepareProjectLaunch to fail")
-    expect(outcome.message).toContain("Your agency project could not load.")
-    expect(outcome.message).toContain("ModuleNotFoundError: No module named 'codex_missing_import_for_canary_test'")
-    expect(outcome.message).toContain("At: agency.py:2")
-    expect(outcome.message).not.toContain("agency.py:99")
-    expect(outcome.message).toContain("import codex_missing_import_for_canary_test")
-    expect(outcome.message).toContain(
-      "Fix the missing import or dependency in this project, then run agentswarm again.",
+    expect(outcome).toMatchObject({
+      directory: dir.path,
+      productMode: "build",
+    })
+    expect(outcome?.configContent).toBeUndefined()
+    expect(outcome?.runProjectDirectory).toBeUndefined()
+    expect(outcome?.pendingRunProjectDirectory).toBe(dir.path)
+    expect(outcome?.pendingRunPythonCommand).toEqual([getTestVenvPython(dir.path)])
+    expect(outcome?.startupFailure).toContain("Your agency project could not load.")
+    expect(outcome?.startupFailure).toContain(
+      "ModuleNotFoundError: No module named 'codex_missing_import_for_canary_test'",
     )
-    expect(outcome.message).not.toContain("Agency Swarm server exited with code 1")
+    expect(outcome?.startupFailure).toContain("At: agency.py:2")
+    expect(outcome?.startupFailure).not.toContain("agency.py:99")
+    expect(outcome?.startupFailure).toContain("import codex_missing_import_for_canary_test")
+    expect(outcome?.startupFailure).toContain("Fix the missing import or dependency in Build, then switch to Run.")
+    expect(outcome?.startupFailure).not.toContain("Agency Swarm server exited with code 1")
     expect(success).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledWith("Opening Build so you can fix this project.")
     expect(info).toHaveBeenCalledWith("Preparing Agent Swarm...")
+  })
+
+  test("prepareProjectLaunch keeps bridge failures outside the project entry as server failures", async () => {
+    await using dir = await tmpdir()
+    await writeAgency(dir.path)
+    await mkdir(path.join(dir.path, ".venv", process.platform === "win32" ? "Scripts" : "bin"), {
+      recursive: true,
+    })
+    await Bun.write(
+      path.join(
+        dir.path,
+        ".venv",
+        process.platform === "win32" ? "Scripts" : "bin",
+        process.platform === "win32" ? "python.exe" : "python",
+      ),
+      "",
+    )
+
+    const traceback = [
+      "Traceback (most recent call last):",
+      '  File "/tmp/agentswarm-npx-test/launch_agency.py", line 1, in <module>',
+      "    raise RuntimeError('bridge failed before loading project')",
+      "RuntimeError: bridge failed before loading project",
+    ].join("\n")
+
+    spyOn(Bun, "spawn").mockImplementation((options: any) => {
+      const cmd = options?.cmd as string[] | undefined
+      if (!cmd) throw new Error("Missing command")
+      if (isUvVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "uv 0.8.0\n",
+          stderr: "",
+        } as never
+      }
+      if (cmd.includes("import sys; print(sys.executable); print(sys.version.split()[0])")) {
+        const target = cmd[0] ?? ""
+        return {
+          exited: Promise.resolve(0),
+          stdout: `${target}\n3.12.7\n`,
+          stderr: "",
+        } as never
+      }
+      if (isUvPipInstallCommand(cmd) || isCanaryCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "",
+          stderr: "",
+        } as never
+      }
+      if (cmd[1]?.endsWith("launch_agency.py")) {
+        return {
+          exited: Promise.resolve(1),
+          stderr: traceback,
+          kill() {},
+        } as never
+      }
+      throw new Error(`Unexpected command: ${cmd.join(" ")}`)
+    })
+
+    await expect(
+      prepareProjectLaunch({
+        directory: dir.path,
+        agencyFile: path.join(dir.path, "agency.py"),
+        moduleName: "agency",
+      }),
+    ).rejects.toThrow("Agency Swarm server exited with code 1")
+  })
+
+  test("prepareLocalProjectRunLaunch reuses the accepted Python command without requiring project .venv", async () => {
+    await using dir = await tmpdir()
+    await writeAgency(dir.path)
+    const acceptedPython = path.join(dir.path, "accepted-python")
+    await Bun.write(acceptedPython, "")
+    const calls: string[][] = []
+    const stderr = createTextOutputStream()
+    let resolveExit: (code: number) => void = () => undefined
+
+    spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as never)
+    spyOn(Bun, "spawn").mockImplementation((options) => {
+      const cmd = Array.isArray(options) ? options : Array.isArray(options.cmd) ? options.cmd : []
+      calls.push(cmd)
+      return {
+        exited: new Promise<number>((resolve) => {
+          resolveExit = resolve
+        }),
+        stderr: stderr.stream,
+        kill() {
+          stderr.close()
+          resolveExit(0)
+        },
+      } as never
+    })
+
+    try {
+      const launch = await prepareLocalProjectRunLaunch(dir.path, AgencyProduct, [acceptedPython])
+
+      expect(launch.runProjectDirectory).toBe(dir.path)
+      expect(launch.config.provider?.["agency-swarm"]?.options?.baseURL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+      const server = calls.find((cmd) => cmd[1]?.endsWith("launch_agency.py"))
+      expect(server?.[0]).toBe(acceptedPython)
+      expect(server?.at(-1)).toBe("agency")
+      expect(existsSync(getTestVenvPython(dir.path))).toBe(false)
+    } finally {
+      await cleanupLocalProjectRunLaunch()
+    }
   })
 
   test("prepareProjectLaunch cancels spinner-wrapped server startup without printing success", async () => {
@@ -2750,13 +2866,12 @@ describe("agency-swarm npx onboarding", () => {
       directory: dir.path,
       agencyFile: path.join(dir.path, "swarm.py"),
       moduleName: "swarm",
-    }).catch((error) => error)
+    })
 
-    expect(outcome).toBeInstanceOf(Error)
-    if (!(outcome instanceof Error)) throw new Error("Expected prepareProjectLaunch to fail")
-    expect(outcome.message).toContain("At: swarm.py:3")
-    expect(outcome.message).not.toContain("At: agency.py:")
-    expect(outcome.message).not.toContain("agency.py:99")
+    expect(outcome?.productMode).toBe("build")
+    expect(outcome?.startupFailure).toContain("At: swarm.py:3")
+    expect(outcome?.startupFailure).not.toContain("At: agency.py:")
+    expect(outcome?.startupFailure).not.toContain("agency.py:99")
   })
 
   test("prepareProjectLaunch refreshes an existing venv when the import canary hangs", async () => {
@@ -5089,6 +5204,43 @@ describe("agency-swarm npx onboarding", () => {
     } finally {
       if (runProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
       else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = runProject
+    }
+  })
+
+  test("pending Build fallback projects do not mark new native sessions as local Run sessions", async () => {
+    await using dir = await tmpdir({ git: true })
+    await writeAgency(dir.path)
+    const runProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    const pendingProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    const pendingPython = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+
+    try {
+      delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+      process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = dir.path
+      process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(["python3"])
+      let session: Session.Info | undefined
+      await Instance.provide({
+        directory: dir.path,
+        fn: async () => {
+          session = await Session.create({})
+        },
+      })
+
+      if (!session) throw new Error("Expected session")
+      expect(await AgencySwarmRunSession.get(session.id)).toBeUndefined()
+      await Instance.provide({
+        directory: dir.path,
+        fn: async () => {
+          await Session.remove(session!.id)
+        },
+      })
+    } finally {
+      if (runProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+      else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = runProject
+      if (pendingProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+      else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = pendingProject
+      if (pendingPython === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+      else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV] = pendingPython
     }
   })
 

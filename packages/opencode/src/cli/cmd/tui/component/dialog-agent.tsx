@@ -1,5 +1,8 @@
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
+import { prepareLocalProjectRunLaunch } from "@/agency-swarm/npx"
+import { AgencySwarmRunSession } from "@/agency-swarm/run-session"
 import { displayAgentName } from "@/agent/display"
+import { Config } from "@/config"
 import { useLocal, type ProductMode } from "@tui/context/local"
 import { useSDK } from "@tui/context/sdk"
 import { useSync } from "@tui/context/sync"
@@ -232,6 +235,14 @@ export function DialogAgent() {
 
   const current = createMemo<AgentOptionValue | undefined>(() => {
     const product = local.product?.current()
+    const agent = local.agent.current()?.name
+    if (!agencySwarmEnabled() && agent && agent !== "build" && agent !== "plan") {
+      return {
+        kind: "local",
+        agent,
+      }
+    }
+
     if (product === "build" || product === "plan") {
       return {
         kind: "mode",
@@ -240,7 +251,6 @@ export function DialogAgent() {
     }
 
     if (!agencySwarmEnabled()) {
-      const agent = local.agent.current()?.name
       return {
         kind: "local",
         agent: agent ?? "build",
@@ -283,10 +293,7 @@ export function DialogAgent() {
       options={options()}
       onSelect={(option) => {
         if (option.value.kind === "mode") {
-          void local.product.set(option.value.mode).then(
-            () => dialog.clear(),
-            () => dialog.clear(),
-          )
+          void setProductMode(option.value.mode)
           return
         }
 
@@ -311,6 +318,60 @@ export function DialogAgent() {
       }}
     />
   )
+
+  async function setProductMode(mode: ProductMode) {
+    try {
+      if (mode === "run") {
+        await prepareLocalRunProject()
+      }
+      await local.product.set(mode)
+      dialog.clear()
+    } catch (error) {
+      toast.show({
+        variant: "error",
+        message: error instanceof Error ? error.message : String(error),
+        duration: 8000,
+      })
+    }
+  }
+
+  async function prepareLocalRunProject() {
+    const directory =
+      process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] ??
+      process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    if (!directory) return
+    const launch = await prepareLocalProjectRunLaunch(directory, undefined, readPendingRunPythonCommand())
+    const enabled = sync.data.config.enabled_providers
+      ? Array.from(new Set([...sync.data.config.enabled_providers, AgencySwarmAdapter.PROVIDER_ID]))
+      : undefined
+    const disabled = sync.data.config.disabled_providers?.filter((item) => item !== AgencySwarmAdapter.PROVIDER_ID)
+    const config = {
+      ...launch.config,
+      ...(enabled ? { enabled_providers: enabled } : {}),
+      ...(disabled ? { disabled_providers: disabled } : {}),
+    } satisfies Config.Info
+    await sdk.client.global.config.update(
+      {
+        config,
+      },
+      {
+        throwOnError: true,
+      },
+    )
+    process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = launch.runProjectDirectory
+    delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+    await sdk.client.instance.dispose()
+    await sync.bootstrap()
+  }
+
+  function readPendingRunPythonCommand() {
+    const value = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+    if (!value) return
+    const parsed: unknown = JSON.parse(value)
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string")) return parsed
+    throw new Error("Pending Agent Swarm Python command is invalid. Restart Agent Swarm and try Run again.")
+  }
 
   async function setAgencySwarmTarget(value: Extract<AgentOptionValue, { kind: "agency" | "recipient" }>) {
     const options = providerOptions()

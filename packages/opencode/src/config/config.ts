@@ -301,6 +301,22 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
   plugin_origins?: ConfigPlugin.Origin[]
 }
 
+const AGENCY_SWARM_PROVIDER_ID = "agency-swarm"
+const AGENCY_SWARM_RUN_PROJECT_ENV = "AGENTSWARM_RUN_PROJECT"
+const AGENCY_SWARM_PENDING_RUN_PROJECT_ENV = "AGENTSWARM_PENDING_RUN_PROJECT"
+
+function preservePreparedAgencySwarmRunConfig(current: Info, next: Info): Info {
+  if (!process.env[AGENCY_SWARM_RUN_PROJECT_ENV] && !process.env[AGENCY_SWARM_PENDING_RUN_PROJECT_ENV]) return next
+  if (!current.provider?.[AGENCY_SWARM_PROVIDER_ID] || !next.provider?.[AGENCY_SWARM_PROVIDER_ID]) return next
+
+  // Keep native env providers, but let the prepared local Run config own Agency Swarm routing.
+  const provider = { ...next.provider }
+  delete provider[AGENCY_SWARM_PROVIDER_ID]
+  const result = { ...next, provider }
+  if (current.model?.startsWith(`${AGENCY_SWARM_PROVIDER_ID}/`)) delete result.model
+  return result
+}
+
 type State = {
   config: Info
   directories: string[]
@@ -661,10 +677,11 @@ export const layer = Layer.effect(
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
-          const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
+          const loaded = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
             dir: ctx.directory,
             source,
           })
+          const next = preservePreparedAgencySwarmRunConfig(result, loaded)
           yield* merge(source, next, "local")
           log.debug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }

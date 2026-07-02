@@ -24,6 +24,7 @@ import { refreshAfterProviderAuth } from "@tui/util/provider-auth-refresh"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
 import { AgencyBrand } from "@/agency-swarm/brand"
 import { AgencyProduct } from "@/agency-swarm/product"
+import { AgencySwarmRunSession } from "@/agency-swarm/run-session"
 import { isAgencySwarmFrameworkMode, isSupportedAgencyAuthProvider } from "../session-error"
 import { errorMessage as toErrorMessage } from "@/util/error"
 import { Log } from "@opencode-ai/core/util/log"
@@ -791,6 +792,9 @@ export function DialogAgencySwarmConnect() {
       },
       { throwOnError: true },
     )
+    delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
     await refreshAfterProviderAuth({
       sessionStatus: () => sync.data.session_status,
       dispose: () => sdk.client.instance.dispose(),
