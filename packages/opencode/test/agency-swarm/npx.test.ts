@@ -1571,7 +1571,7 @@ describe("agency-swarm npx onboarding", () => {
     })
 
     const visible = info.mock.calls.map((call) => String(call[0])).join("\n")
-    expect(confirms).toContain("Set up this project now?")
+    expect(confirms).toContain("Create an isolated project environment?")
     expect(confirms.join("\n")).not.toContain(".venv")
     expect(info).toHaveBeenCalledWith("Preparing Agent Swarm...")
     expect(spinnerStarts).toEqual(["Setting up Agent Swarm", "Starting Agent Swarm"])
