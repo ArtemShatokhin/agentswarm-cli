@@ -1185,7 +1185,7 @@ async function ensureProjectPython(
 
   if (!selfHealing) {
     const createVenv = await prompts.confirm({
-      message: "Set up this project now?",
+      message: "Create an isolated project environment?",
       initialValue: true,
     })
     if (prompts.isCancel(createVenv)) {
