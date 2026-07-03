@@ -425,7 +425,7 @@ describe("Telemetry", () => {
     const output = await runCompiledTelemetry({
       env: {
         AGENTSWARM_MARKETPLACE_PARENT_SWARM_ID: "bad--owner/leak-parent",
-        AGENTSWARM_MARKETPLACE_SWARM_ID: "private/leak-swarm.git",
+        AGENTSWARM_MARKETPLACE_SWARM_ID: "private/leak-swarm.GIT",
         AGENTSWARM_MARKETPLACE_SWARM_ORIGIN: "fork",
       },
       event: "app_started",
@@ -439,7 +439,7 @@ describe("Telemetry", () => {
     expect(JSON.stringify(output.requests[0].body)).not.toContain("leak-parent")
     expect(JSON.stringify(output.requests[0].body)).not.toContain("leak-swarm")
     expect(JSON.stringify(output.requests[0].body)).not.toContain("bad--owner")
-    expect(JSON.stringify(output.requests[0].body)).not.toContain(".git")
+    expect(JSON.stringify(output.requests[0].body).toLowerCase()).not.toContain(".git")
   })
 
   test("uses the default host when no host is compiled", async () => {

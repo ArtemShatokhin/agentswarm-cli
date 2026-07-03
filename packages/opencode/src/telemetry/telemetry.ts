@@ -320,7 +320,7 @@ function safeGitHubRepo(value: string) {
   if (parts.length !== 2) return undefined
   const [owner, repo] = parts
   if (!githubOwnerPattern.test(owner) || owner.includes("--")) return undefined
-  if (repo.endsWith(".git")) return undefined
+  if (repo.toLowerCase().endsWith(".git")) return undefined
   if (!githubRepositoryNamePattern.test(repo)) return undefined
   return trimmed
 }
