@@ -60,7 +60,7 @@ Set `ENABLE_TELEMETRY=0`, `OPEN_SWARM_TELEMETRY=0`, `AGENTSWARM_TELEMETRY=0`, or
 
 Every sent PostHog event sets `$process_person_profile: false` and includes safe base properties such as `version` (the Agent Swarm binary version), `app`, `platform`, `arch`, `channel`, and `terminal` when available.
 
-Product launchers may attach an allowlisted package version as `product_version` and marketplace metadata as `swarm_id`, `parent_swarm_id`, and `swarm_origin` (`original`, `fork`, or `unknown`). Official release binaries use the embedded capture key; runtime PostHog key environment variables do not redirect production telemetry.
+Product launchers may attach an allowlisted package version as `product_version` and marketplace metadata as `swarm_id`, `parent_swarm_id`, and `swarm_origin` (`original`, `fork`, or `unknown`). `swarm_id` and `parent_swarm_id` must be GitHub `owner/repo` names, not repository URLs, git remotes, local paths, or generic slugs. Official release binaries use the embedded capture key; runtime PostHog key environment variables do not redirect production telemetry.
 
 Supported events and properties:
 

@@ -32,6 +32,9 @@ type RunnerInput = {
   event?: Parameters<typeof Telemetry.capture>[0]
   host?: string | null
   key?: string | null
+  marketplaceParentSwarmID?: string | null
+  marketplaceSwarmID?: string | null
+  marketplaceSwarmOrigin?: string | null
   mode?: RunnerMode
   productVersion?: string | null
   properties?: Record<string, unknown>
@@ -171,6 +174,9 @@ async function buildRunnerUnlocked(input: RunnerInput) {
     define: {
       AGENTSWARM_POSTHOG_API_KEY: defineString(input.key, "ph_test"),
       AGENTSWARM_POSTHOG_HOST: defineString(input.host, "https://posthog.example"),
+      AGENTSWARM_MARKETPLACE_PARENT_SWARM_ID: defineString(input.marketplaceParentSwarmID),
+      AGENTSWARM_MARKETPLACE_SWARM_ID: defineString(input.marketplaceSwarmID),
+      AGENTSWARM_MARKETPLACE_SWARM_ORIGIN: defineString(input.marketplaceSwarmOrigin),
       AGENTSWARM_PRODUCT_VERSION: defineString(input.productVersion),
       AGENTSWARM_TELEMETRY_TEST: input.testMode === false ? "undefined" : "true",
       OPENCODE_VERSION: defineString(input.binaryVersion, "local"),
@@ -370,6 +376,69 @@ describe("Telemetry", () => {
     })
 
     expect(output.requests[0].body.properties?.product_version).toBe("2.0.0-compiled")
+  })
+
+  test("preserves full GitHub repository marketplace ids", async () => {
+    await using tmp = await tmpdir()
+    const owner = "a".repeat(39)
+    const repo = "b".repeat(100)
+    const id = `${owner}/${repo}`
+    const parent = `${"c".repeat(39)}/${"d".repeat(100)}`
+    const output = await runCompiledTelemetry({
+      env: {
+        AGENTSWARM_MARKETPLACE_PARENT_SWARM_ID: parent,
+        AGENTSWARM_MARKETPLACE_SWARM_ID: id,
+        AGENTSWARM_MARKETPLACE_SWARM_ORIGIN: "fork",
+      },
+      event: "app_started",
+      properties: { entrypoint: "tui" },
+      stateDir: tmp.path,
+    })
+
+    expect(output.requests[0].body.properties).toMatchObject({
+      parent_swarm_id: parent,
+      swarm_id: id,
+      swarm_origin: "fork",
+    })
+  })
+
+  test("preserves compiled GitHub repository marketplace ids", async () => {
+    await using tmp = await tmpdir()
+    const output = await runCompiledTelemetry({
+      event: "app_started",
+      marketplaceParentSwarmID: "VRSEN/OpenSwarm",
+      marketplaceSwarmID: "example/compiled-swarm",
+      marketplaceSwarmOrigin: "fork",
+      properties: { entrypoint: "tui" },
+      stateDir: tmp.path,
+    })
+
+    expect(output.requests[0].body.properties).toMatchObject({
+      parent_swarm_id: "VRSEN/OpenSwarm",
+      swarm_id: "example/compiled-swarm",
+      swarm_origin: "fork",
+    })
+  })
+
+  test("drops invalid marketplace ids without leaking raw values", async () => {
+    await using tmp = await tmpdir()
+    const output = await runCompiledTelemetry({
+      env: {
+        AGENTSWARM_MARKETPLACE_PARENT_SWARM_ID: "git@github.com:private/leak-parent.git",
+        AGENTSWARM_MARKETPLACE_SWARM_ID: "bad--owner/leak-swarm",
+        AGENTSWARM_MARKETPLACE_SWARM_ORIGIN: "fork",
+      },
+      event: "app_started",
+      properties: { entrypoint: "tui" },
+      stateDir: tmp.path,
+    })
+
+    expect(output.requests[0].body.properties?.parent_swarm_id).toBeUndefined()
+    expect(output.requests[0].body.properties?.swarm_id).toBeUndefined()
+    expect(output.requests[0].body.properties?.swarm_origin).toBe("fork")
+    expect(JSON.stringify(output.requests[0].body)).not.toContain("leak-parent")
+    expect(JSON.stringify(output.requests[0].body)).not.toContain("leak-swarm")
+    expect(JSON.stringify(output.requests[0].body)).not.toContain("bad--owner")
   })
 
   test("uses the default host when no host is compiled", async () => {
@@ -1051,7 +1120,7 @@ describe("Telemetry", () => {
     await using tmp = await tmpdir()
     const output = await runCompiledTelemetry({
       env: {
-        AGENTSWARM_PRODUCT_VERSION: "bad\nprivate product sentinel",
+        AGENTSWARM_PRODUCT_VERSION: "v".repeat(129),
         OPENCODE_CLIENT: "bad\nterminal",
       },
       event: "app_started",
@@ -1061,6 +1130,6 @@ describe("Telemetry", () => {
 
     expect(output.requests[0].body.properties?.terminal).toBeUndefined()
     expect(output.requests[0].body.properties?.product_version).toBeUndefined()
-    expect(JSON.stringify(output.requests[0].body)).not.toContain("private product sentinel")
+    expect(JSON.stringify(output.requests[0].body)).not.toContain("v".repeat(129))
   })
 })

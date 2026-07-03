@@ -15,6 +15,9 @@ const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com"
 const STATE_FILE = "telemetry.json"
 const FALSE_VALUES = new Set(["0", "false", "off", "no"])
 const REQUEST_TIMEOUT_MS = 2_000
+const STRING_MAX_LENGTH = 128
+const githubOwnerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
+const githubRepositoryNamePattern = /^[A-Za-z0-9._-]{1,100}$/
 const publicProviderIDs = new Set([
   "agency-swarm",
   "amazon-bedrock",
@@ -87,6 +90,9 @@ type PropertySpec =
       type: "integration_id"
     }
   | {
+      type: "github_repo"
+    }
+  | {
       type: "provider_id"
     }
   | {
@@ -108,6 +114,7 @@ const authDialogSources = new Set(["auth_dialog"])
 const agentModes = new Set(["all", "primary", "subagent"])
 const agentScopes = new Set(["custom", "global", "project"])
 const booleanField = { type: "boolean" } satisfies PropertySpec
+const githubRepoField = { type: "github_repo" } satisfies PropertySpec
 const providerIDField = { type: "provider_id" } satisfies PropertySpec
 const integrationIDField = { type: "integration_id" } satisfies PropertySpec
 const durationBuckets = new Set(["lt_2s", "2s_10s", "10s_60s", "gte_60s", "unknown"])
@@ -131,10 +138,10 @@ const baseProperties: Record<string, PropertySpec> = {
   app: stringField(),
   arch: stringField(),
   channel: stringField(),
-  parent_swarm_id: stringField(),
+  parent_swarm_id: githubRepoField,
   platform: stringField(platforms),
   product_version: stringField(),
-  swarm_id: stringField(),
+  swarm_id: githubRepoField,
   swarm_origin: stringField(swarmOrigins),
   terminal: stringField(terminalClients),
   version: stringField(),
@@ -301,14 +308,26 @@ function isDisabledByEnvironment() {
 
 function safeString(value: string) {
   const trimmed = value.trim()
-  if (!trimmed || trimmed.length > 128) return undefined
+  if (!trimmed || trimmed.length > STRING_MAX_LENGTH) return undefined
   if (/[\r\n\t]/.test(trimmed)) return undefined
+  return trimmed
+}
+
+function safeGitHubRepo(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed || /[\r\n\t]/.test(trimmed)) return undefined
+  const parts = trimmed.split("/")
+  if (parts.length !== 2) return undefined
+  const [owner, repo] = parts
+  if (!githubOwnerPattern.test(owner) || owner.includes("--")) return undefined
+  if (!githubRepositoryNamePattern.test(repo)) return undefined
   return trimmed
 }
 
 function safeValue(spec: PropertySpec, value: unknown): SafeValue | undefined {
   if (spec.type === "boolean") return typeof value === "boolean" ? value : undefined
   if (typeof value !== "string") return undefined
+  if (spec.type === "github_repo") return safeGitHubRepo(value)
 
   const safe = safeString(value)
   if (!safe) return undefined
