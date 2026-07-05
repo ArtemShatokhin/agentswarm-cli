@@ -1,5 +1,5 @@
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
-import { prepareLocalProjectRunLaunch } from "@/agency-swarm/npx"
+import { cleanupLocalProjectRunLaunch, prepareLocalProjectRunLaunch } from "@/agency-swarm/npx"
 import { AgencySwarmRunSession } from "@/agency-swarm/run-session"
 import { displayAgentName } from "@/agent/display"
 import { Config } from "@/config"
@@ -40,6 +40,32 @@ type AgentOptionValue =
   | {
       kind: "connect"
     }
+
+type ProviderConfig = NonNullable<Config.Info["provider"]>[string]
+
+function mergeLocalRunProvider(input: { current?: ProviderConfig; launch?: ProviderConfig }) {
+  if (!input.launch) return input.current
+
+  const options = { ...(input.launch.options ?? {}) }
+  const currentOptions = input.current?.options
+  const launchAgency = input.launch.options?.["agency"]
+  if (currentOptions && currentOptions["agency"] === launchAgency) {
+    for (const key of [
+      "recipientAgent",
+      "recipientAgentSelectedAt",
+      "recipient_agent",
+      "recipient_agent_selected_at",
+    ] as const) {
+      if (Object.hasOwn(currentOptions, key)) options[key] = currentOptions[key]
+    }
+  }
+
+  return {
+    ...input.current,
+    ...input.launch,
+    options,
+  }
+}
 
 export function DialogAgent() {
   const local = useLocal()
@@ -340,37 +366,61 @@ export function DialogAgent() {
       process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] ??
       process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
     if (!directory) return
-    const launch = await prepareLocalProjectRunLaunch(directory, undefined, readPendingRunPythonCommand())
-    const enabled = sync.data.config.enabled_providers
-      ? Array.from(new Set([...sync.data.config.enabled_providers, AgencySwarmAdapter.PROVIDER_ID]))
-      : undefined
-    const disabled = sync.data.config.disabled_providers?.filter((item) => item !== AgencySwarmAdapter.PROVIDER_ID)
-    const config = {
-      ...launch.config,
-      ...(enabled ? { enabled_providers: enabled } : {}),
-      ...(disabled ? { disabled_providers: disabled } : {}),
-    } satisfies Config.Info
-    await sdk.client.global.config.update(
-      {
-        config,
-      },
-      {
-        throwOnError: true,
-      },
-    )
-    process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = launch.runProjectDirectory
-    delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
-    delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
-    await sdk.client.instance.dispose()
-    await sync.bootstrap()
+    const launch = await prepareLocalProjectRunLaunch(directory, undefined, readRunPythonCommand())
+    try {
+      const current = sync.data.config as unknown as Config.Info
+      const enabled = current.enabled_providers
+        ? Array.from(new Set([...current.enabled_providers, AgencySwarmAdapter.PROVIDER_ID]))
+        : undefined
+      const disabled = current.disabled_providers?.filter((item) => item !== AgencySwarmAdapter.PROVIDER_ID)
+      const provider = { ...(current.provider ?? {}) }
+      const agencyProvider = mergeLocalRunProvider({
+        current: current.provider?.[AgencySwarmAdapter.PROVIDER_ID],
+        launch: launch.config.provider?.[AgencySwarmAdapter.PROVIDER_ID],
+      })
+      if (agencyProvider) provider[AgencySwarmAdapter.PROVIDER_ID] = agencyProvider
+      const config = {
+        ...current,
+        ...launch.config,
+        provider: {
+          ...provider,
+        },
+        ...(enabled ? { enabled_providers: enabled } : {}),
+        ...(disabled ? { disabled_providers: disabled } : {}),
+      } satisfies Config.Info
+      await sdk.client.global.config.update(
+        {
+          config,
+        },
+        {
+          throwOnError: true,
+        },
+      )
+      process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = launch.runProjectDirectory
+      process.env[AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(launch.runPythonCommand)
+      delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+      delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+      await sdk.client.global.dispose({ throwOnError: true })
+      await sync.bootstrap()
+    } catch (error) {
+      await cleanupLocalProjectRunLaunch()
+      throw error
+    }
   }
 
-  function readPendingRunPythonCommand() {
-    const value = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+  function readRunPythonCommand() {
+    return (
+      readRunPythonCommandEnv(AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV) ??
+      readRunPythonCommandEnv(AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV)
+    )
+  }
+
+  function readRunPythonCommandEnv(name: string) {
+    const value = process.env[name]
     if (!value) return
     const parsed: unknown = JSON.parse(value)
     if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string")) return parsed
-    throw new Error("Pending Agent Swarm Python command is invalid. Restart Agent Swarm and try Run again.")
+    throw new Error("Agent Swarm Python command is invalid. Restart Agent Swarm and try Run again.")
   }
 
   async function setAgencySwarmTarget(value: Extract<AgentOptionValue, { kind: "agency" | "recipient" }>) {

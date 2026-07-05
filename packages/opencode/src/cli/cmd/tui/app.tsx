@@ -80,7 +80,6 @@ import {
   useOpencodeKeymap,
 } from "./keymap"
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
-import { cleanupLocalProjectRunLaunch } from "@/agency-swarm/npx"
 import { AgencySwarmOllama } from "@/agency-swarm/ollama"
 import { AgencyProduct } from "@/agency-swarm/product"
 import {
@@ -356,7 +355,6 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
   onCleanup(() => {
     offSelectionKeys()
     attention.dispose()
-    void cleanupLocalProjectRunLaunch()
   })
 
   // Wire up console copy-to-clipboard via opentui's onCopySelection callback

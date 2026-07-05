@@ -39,6 +39,36 @@ describe("provider auth refresh", () => {
     expect(calls).toEqual(["bootstrap", "sleep", "dispose", "bootstrap"])
   })
 
+  test("defers pre-dispose cleanup while a session is active", async () => {
+    const calls: string[] = []
+    let deferred: (() => Promise<void>) | undefined
+    const statuses = [{ ses_1: { type: "busy" } }, { ses_1: { type: "idle" } }]
+
+    await refreshAfterProviderAuth({
+      sessionStatus: () => statuses[0] ?? { ses_1: { type: "idle" } },
+      beforeDispose: async () => {
+        calls.push("cleanup")
+      },
+      dispose: async () => {
+        calls.push("dispose")
+      },
+      bootstrap: async () => {
+        calls.push("bootstrap")
+      },
+      defer: (task) => {
+        deferred = task
+      },
+      sleep: async () => {
+        calls.push("sleep")
+        statuses.shift()
+      },
+    })
+
+    expect(calls).toEqual(["bootstrap"])
+    await deferred?.()
+    expect(calls).toEqual(["bootstrap", "sleep", "cleanup", "dispose", "bootstrap"])
+  })
+
   test("reloads the instance when all sessions are idle", async () => {
     const calls: string[] = []
 

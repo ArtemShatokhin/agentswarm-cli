@@ -7,17 +7,23 @@ export function hasActiveSession(status: SessionStatusMap) {
 
 export async function refreshAfterProviderAuth(input: {
   sessionStatus: SessionStatusInput
+  beforeDispose?: () => Promise<unknown>
   dispose: () => Promise<unknown>
   bootstrap: () => Promise<unknown>
   defer?: (task: () => Promise<void>) => unknown
   sleep?: (ms: number) => Promise<unknown>
 }) {
+  const dispose = async () => {
+    await input.beforeDispose?.()
+    await input.dispose()
+  }
+
   if (hasActiveSession(readSessionStatus(input.sessionStatus))) {
     await input.bootstrap()
     ;(input.defer ?? ((task) => queueMicrotask(() => void task().catch(() => undefined))))(() =>
       refreshAfterActiveSessionsIdle({
         sessionStatus: input.sessionStatus,
-        dispose: input.dispose,
+        dispose,
         bootstrap: input.bootstrap,
         sleep: input.sleep,
       }),
@@ -25,7 +31,7 @@ export async function refreshAfterProviderAuth(input: {
     return
   }
 
-  await input.dispose()
+  await dispose()
   await input.bootstrap()
 }
 

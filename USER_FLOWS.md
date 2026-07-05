@@ -60,9 +60,11 @@ For each failure scenario, capture the visible user result and cite the matching
 - **Happy-path proof:** No second unpinned `agency-swarm` upgrade runs after manifest install.
 - **Happy-path proof:** Launcher-managed `agency-swarm[fastapi,litellm]` is used only when no manifest exists.
 - **Happy-path proof:** Local `.venv` uv is used for launcher-managed fallback installs into `.venv`.
+- **Happy-path proof:** After Build changes dependency manifests, switching back to Run refreshes the existing project `.venv` before starting the local server.
 - **Failure scenarios to test:** Missing Python 3.12+ produces a visible launcher failure.
 - **Failure scenarios to test:** Failed project imports after the Python environment is ready open Build instead of exiting, prefill the startup error, and let the user start Run from the same project after the fix.
 - **Failure scenarios to test:** An unreadable existing `agency.py` shows `Could not read agency.py. Make sure the project files are downloaded and readable, then try again.` and offers only `Try again`, `Connect to a running Agent Swarm`, and `Cancel`.
+- **Failure scenarios to test:** If Run cannot refresh changed dependency manifests, it stops before starting the local server and shows the dependency-refresh failure.
 - **Failure scenarios to test:** uv install or repair failure produces a visible launcher failure.
 - **Failure scenarios to test:** Dependency setup failure produces a visible launcher failure.
 
@@ -220,6 +222,7 @@ For each failure scenario, capture the visible user result and cite the matching
 - **Happy-path proof:** Plan mode submits the OpenCode Plan agent while Plan is selected; choosing another OpenCode agent moves the turn back to native Build behavior instead of silently ignoring the selected agent.
 - **Happy-path proof:** Switching from Run to Build or Plan stops treating prompts as server-backed Run prompts.
 - **Happy-path proof:** Sending a Build or Plan prompt after leaving Run does not erase the saved Run target for the session.
+- **Happy-path proof:** Returning to Run after Build restarts the local project server from current project files while preserving the selected Run target.
 - **Happy-path proof:** Shell commands in Build and Plan preserve native mode when the session is reopened.
 - **Happy-path proof:** In Build and Plan, `/compact` and auto-compaction keep prompts on OpenCode routing and do not switch the session back to server-backed Run routing.
 - **Happy-path proof:** When Plan finishes and asks whether to switch to Build, pressing Enter on `Yes` follows the upstream OpenCode Plan approval flow, switches the TUI to Build, and creates the native approved-plan handoff turn.

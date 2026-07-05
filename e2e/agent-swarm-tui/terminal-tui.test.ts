@@ -31,6 +31,7 @@ let sharedTelemetryBuildDir: string | undefined
 const tempDirs: string[] = []
 const tuiReadyTimeoutMs = process.env.CI ? 120_000 : 30_000
 const tuiInteractionTimeoutMs = process.env.CI ? 60_000 : 45_000
+const tuiNativeTurnTimeoutMs = process.env.CI ? tuiReadyTimeoutMs : tuiInteractionTimeoutMs
 const livePostHogTest = process.env.AGENTSWARM_LIVE_POSTHOG_E2E === "1" ? test : test.skip
 const unixTest = process.platform === "win32" ? test.skip : test
 const fakePostHogKeyFragments = ["dummy", "example", "fake", "not-a-live-key", "ph_test"]
@@ -51,8 +52,12 @@ function commandLine(screen: string, command: string) {
   return screen.split("\n").find((line) => new RegExp(`┃\\s+${command}\\b`).test(line)) ?? ""
 }
 
+function hasCompletedModeTurn(text: string, mode: "Build" | "Plan" | "Run") {
+  return new RegExp(`▣\\s+${mode} · .+ · \\d+(?:\\.\\d+)?(?:ms|s)`).test(text)
+}
+
 function hasCompletedRunTurn(screen: string) {
-  return /▣\s+Run · .+ · \d+(?:\.\d+)?(?:ms|s)\b/.test(screen)
+  return hasCompletedModeTurn(screen, "Run")
 }
 
 function hasTimelineRow(screen: string, prompt: string) {
@@ -145,7 +150,8 @@ function nativeOpenAIOnlyConfig(baseURL: string) {
 function nativeOpenAIWithStaleAgencyConfig(baseURL: string) {
   return {
     ...nativeOpenAIOnlyConfig(baseURL),
-    enabled_providers: ["openai", "agency-swarm"],
+    enabled_providers: ["openai"],
+    disabled_providers: ["agency-swarm"],
     provider: {
       ...nativeOpenAIOnlyConfig(baseURL).provider,
       "agency-swarm": {
@@ -222,6 +228,50 @@ function equivalentResolvedTestPaths(file: string) {
     values.add(resolved.slice("/private".length))
   }
   return values
+}
+
+async function readGlobalAgencyConfigText(tui: TuiProcess) {
+  const dir = path.join(tui.root, "config", "agentswarm")
+  const entries = await readdir(dir).catch((error: unknown) => {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return []
+    throw error
+  })
+  const files = entries.filter((entry) => entry === "agentswarm.json" || entry === "agentswarm.jsonc")
+  return (await Promise.all(files.map((file) => readFile(path.join(dir, file), "utf8")))).join("\n")
+}
+
+async function waitForAgencyServerClosed(baseURL: string) {
+  const deadline = Date.now() + tuiInteractionTimeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseURL}/openapi.json`, { signal: AbortSignal.timeout(1000) })
+      if (!response.ok) return
+    } catch {
+      return
+    }
+    await Bun.sleep(100)
+  }
+  throw new Error(`Agency server stayed reachable at ${baseURL}`)
+}
+
+async function waitForLocalRunServerURL(dir: string) {
+  const file = path.join(dir, ".run-server-url")
+  const deadline = Date.now() + tuiInteractionTimeoutMs
+  while (Date.now() < deadline) {
+    if (await Bun.file(file).exists()) return (await readFile(file, "utf8")).trim()
+    await Bun.sleep(100)
+  }
+  throw new Error(`No local Run server URL recorded for ${dir}`)
+}
+
+async function waitForLocalRunServerCleanup(dir: string, baseURL: string) {
+  const file = path.join(dir, `.run-server-closed-${new URL(baseURL).port}`)
+  const deadline = Date.now() + tuiInteractionTimeoutMs
+  while (Date.now() < deadline) {
+    if (await Bun.file(file).exists()) return
+    await Bun.sleep(100)
+  }
+  throw new Error(`No local Run server cleanup marker recorded for ${baseURL}`)
 }
 
 function stripAgencySwarmBridgeMetadata(dbPath: string) {
@@ -451,12 +501,35 @@ describe("Agent Swarm terminal TUI e2e", () => {
       await writeAgencyProject(project)
       await writeBrokenLaunchVenvPython(project)
       currentNativeServer = await startNativeLLMServer()
+      const config = nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)
 
       currentTui = await startTui({
         cwd: packageRoot,
         env: {
           AGENTSWARM_LAUNCHER: "1",
-          OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)),
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            ...config,
+            provider: {
+              ...config.provider,
+              "agency-swarm": {
+                ...config.provider["agency-swarm"],
+                options: {
+                  ...config.provider["agency-swarm"].options,
+                  agency: "local-agency",
+                  recipientAgent: "entry-agent",
+                  recipientAgentSelectedAt: 1,
+                },
+              },
+            },
+            agent: {
+              reviewer: {
+                mode: "primary",
+                description: "Native reviewer",
+                model: latestOpenAITestModel,
+                prompt: "Native reviewer instructions.",
+              },
+            },
+          }),
           XDG_STATE_HOME: stateHome,
         },
         args: [project],
@@ -488,14 +561,52 @@ describe("Agent Swarm terminal TUI e2e", () => {
       await selectProductMode(currentTui, "Run")
       currentTui.write("try fixed swarm from startup fallback\r")
       await currentTui.waitForText("first repaired local run response", tuiInteractionTimeoutMs)
+      await currentTui.waitForText("recipient=entry-agent", tuiInteractionTimeoutMs)
       await waitForLocalRunSession(stateHome, project)
+      expect(await readGlobalAgencyConfigText(currentTui)).not.toContain("local-agency")
 
       await selectProductMode(currentTui, "Build")
+      currentTui.write("/agents\r")
+      await currentTui.waitForText("Reviewer", tuiInteractionTimeoutMs)
+      currentTui.write("\x1b")
+      await currentTui.waitFor(
+        () => !currentTui!.screen().includes("Select agent"),
+        "native agent picker dismissed",
+        tuiInteractionTimeoutMs,
+      )
       await writeRunVersion(project, "second repaired local run response")
       await selectProductMode(currentTui, "Run")
       currentTui.write("try fixed swarm after second repair\r")
       await currentTui.waitForText("second repaired local run response", tuiInteractionTimeoutMs)
+      await currentTui.waitForText("recipient=entry-agent", tuiInteractionTimeoutMs)
       await waitForLocalRunSession(stateHome, project)
+      await currentTui.waitFor(
+        () => !currentTui!.screen().includes("esc interrupt"),
+        "idle after second repaired local run",
+        tuiInteractionTimeoutMs,
+      )
+
+      const localRunBaseURL = await waitForLocalRunServerURL(project)
+      currentServer = await startAgencyProtocolServer()
+      clearPrompt(currentTui)
+      currentTui.write("/connect")
+      await currentTui.waitForText("/connect", tuiInteractionTimeoutMs)
+      currentTui.write("\r")
+      await currentTui.waitForText("Add local port", tuiInteractionTimeoutMs)
+      currentTui.write("\x1b[B\r")
+      await currentTui.waitForText("Add local Agency port", tuiInteractionTimeoutMs)
+      currentTui.write(`${new URL(currentServer.baseURL).port}\r`)
+      await currentTui.waitForText(`Connected to ${currentServer.baseURL}`, tuiInteractionTimeoutMs)
+      await waitForLocalRunServerCleanup(project, localRunBaseURL)
+      await waitForAgencyServerClosed(localRunBaseURL)
+
+      currentTui.write("external run after local cleanup\r")
+      await currentTui.waitFor(
+        () => currentServer!.requests.some((request) => request.body.message === "external run after local cleanup"),
+        "external Run request after local cleanup",
+        tuiInteractionTimeoutMs,
+      )
+      await expectNoLocalRunSession(stateHome, project)
     },
   )
 
@@ -528,8 +639,19 @@ describe("Agent Swarm terminal TUI e2e", () => {
     await currentTui.waitForText("Your agency project could not load.", tuiInteractionTimeoutMs)
 
     currentTui.write("\r")
-    await waitForNativeLLMRequest(currentTui, currentNativeServer, "dotenv_missing")
-    await currentTui.waitForText("native-mode-ok", tuiInteractionTimeoutMs)
+    const request = await waitForNativeLLMRequest(currentTui, currentNativeServer, "dotenv_missing")
+    const body = nativeRequestBody(request)
+    expect(body).toContain("Fix this Agent Swarm startup error")
+    expect(body).toContain("Agent Swarm Build Instructions")
+    expect(body).not.toContain("Agent Swarm Planner Instructions")
+    await currentTui.waitFor(
+      () =>
+        hasCompletedModeTurn(currentTui!.history(), "Build") &&
+        footerHasMode(currentTui!.screen(), "Build") &&
+        !currentTui!.screen().includes("esc interrupt"),
+      "idle Build fallback after native startup request",
+      tuiNativeTurnTimeoutMs,
+    )
     await expectNoLocalRunSession(stateHome, project)
 
     clearPrompt(currentTui)
@@ -551,6 +673,9 @@ describe("Agent Swarm terminal TUI e2e", () => {
       tuiInteractionTimeoutMs,
     )
     await expectNoLocalRunSession(stateHome, project)
+    const configText = await readGlobalAgencyConfigText(currentTui)
+    expect(configText).toContain(currentServer!.baseURL)
+    expect(configText).not.toContain("local-agency")
   })
 
   test("launcher uses Agent Swarm connect copy without stale hints", async () => {
@@ -1173,9 +1298,15 @@ describe("Agent Swarm terminal TUI e2e", () => {
     )
     expect(currentServer.requests).toHaveLength(0)
 
+    const buildRequestStart = currentNativeServer.requests.length
     currentTui.write(`${buildPrompt}\r`)
-    await currentTui.waitForText("native-mode-ok", tuiInteractionTimeoutMs)
-    const request = await waitForNativeLLMRequest(currentTui, currentNativeServer, buildPrompt)
+    await currentTui.waitForText("native-mode-ok", tuiNativeTurnTimeoutMs)
+    const request = await waitForNextNativeLLMRequest(
+      currentTui,
+      currentNativeServer,
+      buildRequestStart,
+      "Build request after approved Plan handoff",
+    )
     const body = JSON.stringify(request.body)
     expect(body).toContain("Agent Swarm Build Instructions")
     expect(body).not.toContain("Agent Swarm Planner Instructions")
@@ -1246,11 +1377,16 @@ describe("Agent Swarm terminal TUI e2e", () => {
       tuiInteractionTimeoutMs,
     )
 
+    const buildRequestStart = currentNativeServer.requests.length
     currentTui.write(`${buildPrompt}\r`)
     await currentTui.waitForText("native-mode-ok", tuiInteractionTimeoutMs)
-    const request = await waitForNativeLLMRequest(currentTui, currentNativeServer, buildPrompt)
+    const request = await waitForNextNativeLLMRequest(
+      currentTui,
+      currentNativeServer,
+      buildRequestStart,
+      "Build request after startup Plan approval",
+    )
     const body = nativeRequestBody(request)
-    expect(body).toContain(buildPrompt)
     expect(body).toContain("Agent Swarm Build Instructions")
     expect(body).not.toContain("Agent Swarm Planner Instructions")
   })
@@ -1421,7 +1557,16 @@ describe("Agent Swarm terminal TUI e2e", () => {
       await selectProductMode(currentTui, mode)
       currentTui.write(`!printf ${shellMarker}\r`)
       await currentTui.waitForText(shellMarker, tuiInteractionTimeoutMs)
-      currentTui.write("/sessions\r")
+      currentTui.write("\x1b")
+      await currentTui.waitFor(
+        () => footerHasMode(currentTui!.screen(), mode) && !currentTui!.screen().includes("esc exit shell mode"),
+        `${mode} shell command view closed`,
+        tuiInteractionTimeoutMs,
+      )
+      clearPrompt(currentTui)
+      currentTui.write("/sessions")
+      await currentTui.waitForText("/sessions", tuiInteractionTimeoutMs)
+      currentTui.write("\r")
       await currentTui.waitForText("Sessions", tuiInteractionTimeoutMs)
       await currentTui.waitForText(shellMarker, tuiInteractionTimeoutMs)
       currentTui.write("\x1b")
@@ -2190,6 +2335,10 @@ describe("Agent Swarm terminal TUI e2e", () => {
     const body = currentServer.requests[0]?.body
     expect(body?.message).toContain("route through the whole swarm")
     expect(body).not.toHaveProperty("recipient_agent")
+    const configText = await readGlobalAgencyConfigText(currentTui)
+    expect(configText).toContain(currentServer.baseURL)
+    expect(configText).toContain("tui-demo-agency")
+    expect(configText).not.toContain("UserSupportAgent")
   })
 
   test("selecting a specific agent routes the next prompt to that agent", async () => {
@@ -3053,6 +3202,19 @@ async function waitForNativeLLMRequest(tui: TuiProcess, server: NativeLLMServer,
   return request!
 }
 
+async function waitForNextNativeLLMRequest(tui: TuiProcess, server: NativeLLMServer, start: number, label: string) {
+  let request: NativeLLMServer["requests"][number] | undefined
+  await tui.waitFor(
+    () => {
+      request = server.requests.slice(start).find((item) => !isNativeTitleRequest(item))
+      return request !== undefined
+    },
+    label,
+    tuiInteractionTimeoutMs,
+  )
+  return request!
+}
+
 async function waitForDeadAgencyServerUi(tui: TuiProcess) {
   await tui.waitFor(
     () => {
@@ -3086,6 +3248,11 @@ async function writeBrokenLaunchVenvPython(dir: string) {
     [
       "const port = Number(process.argv[2] ?? process.argv[1])",
       "const response = (await Bun.file('.run-version').text().catch(() => 'startup fallback local run response')).trim()",
+      "await Bun.write('.run-server-url', `http://127.0.0.1:${port}\\n`)",
+      "const closed = `.run-server-closed-${port}`",
+      "const cleanup = () => Bun.write(closed, 'closed\\n').finally(() => process.exit(0))",
+      "process.on('SIGTERM', cleanup)",
+      "process.on('SIGINT', cleanup)",
       "Bun.serve({",
       "  hostname: '127.0.0.1',",
       "  port,",
@@ -3100,7 +3267,8 @@ async function writeBrokenLaunchVenvPython(dir: string) {
       "    if (url.pathname === '/local-agency/get_response_stream') {",
       "      const body = await request.json().catch(() => ({}))",
       "      const text = typeof body.message === 'string' ? body.message : ''",
-      '      return new Response(`event: meta\\ndata: {\\"run_id\\":\\"run_startup_fallback\\"}\\n\\nevent: messages\\ndata: {\\"new_messages\\":[{\\"id\\":\\"msg_startup_fallback\\",\\"type\\":\\"message\\",\\"role\\":\\"assistant\\",\\"agent\\":\\"entry-agent\\",\\"content\\":[{\\"type\\":\\"output_text\\",\\"text\\":\\"${response}: ${text}\\"}]}]}\\n\\nevent: end\\ndata: {}\\n\\n`, { headers: { \'Content-Type\': \'text/event-stream\', \'Cache-Control\': \'no-cache\' } })',
+      "      const recipient = typeof body.recipient_agent === 'string' ? body.recipient_agent : 'none'",
+      '      return new Response(`event: meta\\ndata: {\\"run_id\\":\\"run_startup_fallback\\"}\\n\\nevent: messages\\ndata: {\\"new_messages\\":[{\\"id\\":\\"msg_startup_fallback\\",\\"type\\":\\"message\\",\\"role\\":\\"assistant\\",\\"agent\\":\\"entry-agent\\",\\"content\\":[{\\"type\\":\\"output_text\\",\\"text\\":\\"${response}: ${text}: recipient=${recipient}\\"}]}]}\\n\\nevent: end\\ndata: {}\\n\\n`, { headers: { \'Content-Type\': \'text/event-stream\', \'Cache-Control\': \'no-cache\' } })',
       "    }",
       "    if (url.pathname === '/local-agency/cancel_response_stream') return Response.json({ cancelled: true })",
       "    return new Response('not found', { status: 404 })",

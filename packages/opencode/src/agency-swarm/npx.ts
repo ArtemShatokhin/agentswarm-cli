@@ -64,6 +64,7 @@ export interface PreparedNpxLaunch {
   directory: string
   configContent?: string
   runProjectDirectory?: string
+  runPythonCommand?: string[]
   pendingRunProjectDirectory?: string
   pendingRunPythonCommand?: string[]
   productMode?: "build"
@@ -1035,6 +1036,7 @@ export async function prepareProjectLaunch(
     const python = await ensureProjectPython(project.directory, profile)
     if (!python) return
 
+    await cleanupLocalProjectRunLaunch()
     const server = await withSpinner(
       `Starting ${profile.name}`,
       `${profile.name} ready`,
@@ -1058,14 +1060,21 @@ export async function prepareProjectLaunch(
         startupFailure: server.failure,
       }
     }
+    const config = buildAgencyConfigData({
+      baseURL: server.baseURL,
+      agency: LOCAL_AGENCY_ID,
+    })
+    localRunLaunch = {
+      directory: Filesystem.resolve(project.directory),
+      config,
+      cleanup: server.cleanup,
+    }
     return {
       directory: project.directory,
       runProjectDirectory: project.directory,
-      configContent: buildAgencyConfig({
-        baseURL: server.baseURL,
-        agency: LOCAL_AGENCY_ID,
-      }),
-      cleanup: server.cleanup,
+      runPythonCommand: python,
+      configContent: JSON.stringify(config),
+      cleanup: cleanupLocalProjectRunLaunch,
     }
   } catch (error) {
     if (isStartupCancelledError(error)) return
@@ -1085,7 +1094,12 @@ export async function prepareLocalProjectRunLaunch(
   directory: string,
   profile: ProductProfile = AgencyProduct,
   python?: string[],
-): Promise<{ directory: string; runProjectDirectory: string; config: ReturnType<typeof buildAgencyConfigData> }> {
+): Promise<{
+  directory: string
+  runProjectDirectory: string
+  runPythonCommand: string[]
+  config: ReturnType<typeof buildAgencyConfigData>
+}> {
   const project = await detectAgencyProject(directory, profile)
   if (!project) throw new Error(`No ${profile.name} project found in ${directory}`)
 
@@ -1095,6 +1109,7 @@ export async function prepareLocalProjectRunLaunch(
   if (!python && !existsSync(command[0] ?? "")) {
     throw new Error(`Project .venv is not ready. Use Build to repair it, then switch to Run again.`)
   }
+  await refreshLocalRunProjectDependencies(project.directory, command, launchProfile(profile))
   const server = await startProjectServer(project.directory, command, project.moduleName, project.agencyFile)
   const config = buildAgencyConfigData({
     baseURL: server.baseURL,
@@ -1108,8 +1123,56 @@ export async function prepareLocalProjectRunLaunch(
   return {
     directory: project.directory,
     runProjectDirectory: project.directory,
+    runPythonCommand: command,
     config,
   }
+}
+
+async function refreshLocalRunProjectDependencies(
+  directory: string,
+  command: string[],
+  profile: Pick<LaunchProfile, "name" | "stateRoot">,
+) {
+  if (!isProjectVenvPythonCommand(directory, command)) return
+  if (!(await hasDependencyManifest(directory))) return
+
+  const venvPython = command[0]!
+  const refreshLogFile = await tryCreateProjectCommandLogFile(
+    directory,
+    "launcher-run-refresh",
+    "launcher Run refresh",
+    profile,
+  )
+  await withSpinner(
+    `Refreshing ${profile.name}`,
+    `${profile.name} refresh checked`,
+    `${profile.name} refresh failed`,
+    async (signal) => {
+      const localUv = await ensureLocalUv(directory, venvPython, {
+        logFile: refreshLogFile,
+        signal,
+        timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
+      })
+      const refresh = await installProjectDependencies(directory, venvPython, localUv, {
+        logFile: refreshLogFile,
+        signal,
+        timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
+      })
+      if (refresh.timedOut) {
+        throw new Error(formatCommandTimeout(refresh, "Project dependency refresh", REBUILD_INSTALL_TIMEOUT_MS))
+      }
+      if (refresh.code !== 0) {
+        throw new Error(formatCommandFailure(refresh, "Project dependency refresh failed"))
+      }
+    },
+  )
+}
+
+function isProjectVenvPythonCommand(directory: string, command: string[]) {
+  const [python, ...rest] = command
+  return (
+    !!python && rest.length === 0 && Filesystem.resolve(python) === Filesystem.resolve(getVenvPythonPath(directory))
+  )
 }
 
 export async function cleanupLocalProjectRunLaunch() {
