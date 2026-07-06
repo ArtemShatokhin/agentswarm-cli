@@ -246,7 +246,9 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
   - Behavior: `/agents` switches product mode and lists choices in work order. Outside Run, it lists Plan, Build, and Run before native agent choices. In Run, it lists Plan and Build before live swarm and agent choices. Build selects the native `build` agent, Plan selects the native `plan` agent, and Run keeps prompts server-backed through Agency Swarm.
   - Behavior: leaving Run stops prompt routing through the Agency Swarm backend but preserves the saved Run target for the session; returning to Run reconnects to or keeps using the configured Agency Swarm server.
   - Behavior: returning to local-project Run after Build relaunches from current project files, refreshes manifest dependencies into the project `.venv`, and preserves the selected local Run target.
+  - Behavior: dependency refresh during an in-TUI switch back to Run does not use launcher terminal spinners, so keyboard input remains owned by the TUI after the local server starts.
   - Behavior: if manifest dependency refresh fails while returning to Run, the local server does not start with stale packages.
+  - Behavior: selecting the already-current local Run server in `/connect` is a no-op that preserves local project state instead of persisting a stale random port. Selecting the already-current external server from Build fallback clears pending local repair state so Run stays external.
   - Behavior: Build and Plan prompts, commands, shell turns, and compaction turns persist native routing metadata so reopened sessions do not silently fall back to Run.
   - Behavior: reopened Plan sessions keep Plan selected in `/agents` instead of using a stale Build default.
   - Behavior: compaction created in Build or Plan keeps native routing metadata so `/compact`, auto-compaction, and direct continuation do not switch the session back to server-backed Run.
@@ -326,10 +328,11 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
   - Behavior: `--prompt`, `--agent`, and explicit `agency-swarm/...` model launches skip onboarding.
   - Behavior: auto-project launch requires a detected Agency project.
   - Behavior: if a detected local project has a ready Python environment but fails during project import or startup, the TUI opens Build with the startup error prefilled instead of exiting to the shell. After the user fixes the project, choosing Run from `/agents` starts the same local project.
+  - Behavior: from that Build fallback, typing `/` keeps slash commands available by replacing the prefilled repair prompt instead of submitting the startup error text.
   - Behavior: stale Agency Swarm settings from `OPENCODE_CONFIG_CONTENT` cannot override the freshly prepared local Run server after startup falls back to Build.
   - Behavior: if the user connects to an external server from that Build fallback, choosing Run uses the connected server instead of replacing it with the pending local project.
   - Behavior: non-Agency explicit models do not trigger fork auto-project setup.
-  - Implementation: `shouldRunNpxOnboarding`, `resolveNpxAutoProject`, `prepareProjectLaunch`, and `prepareLocalProjectRunLaunch` in `packages/opencode/src/agency-swarm/npx.ts`; startup fallback args in `packages/opencode/src/cli/cmd/tui/thread.ts`, `packages/opencode/src/cli/cmd/tui/app.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, and `packages/opencode/src/cli/cmd/tui/routes/home.tsx`.
+  - Implementation: `shouldRunNpxOnboarding`, `resolveNpxAutoProject`, `prepareProjectLaunch`, and `prepareLocalProjectRunLaunch` in `packages/opencode/src/agency-swarm/npx.ts`; startup fallback args in `packages/opencode/src/cli/cmd/tui/thread.ts`, `packages/opencode/src/cli/cmd/tui/app.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`, and `packages/opencode/src/cli/cmd/tui/routes/home.tsx`.
   - Implementation: stale launch-config routing guards live in `packages/opencode/src/config/config.ts` and `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx`.
   - Added by: `772db106`
 

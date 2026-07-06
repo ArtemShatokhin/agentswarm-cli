@@ -557,11 +557,13 @@ describe("Agent Swarm terminal TUI e2e", () => {
       await expectNoLocalRunSession(stateHome, project)
 
       await markBrokenLaunchFixed(project)
+      await writeLocalRunRefreshManifest(project)
       await writeRunVersion(project, "first repaired local run response")
       await selectProductMode(currentTui, "Run")
       currentTui.write("try fixed swarm from startup fallback\r")
       await currentTui.waitForText("first repaired local run response", tuiInteractionTimeoutMs)
       await currentTui.waitForText("recipient=entry-agent", tuiInteractionTimeoutMs)
+      expect(await readFile(path.join(project, ".uv-run-refresh-log"), "utf8")).toContain("pip install --python")
       await waitForLocalRunSession(stateHome, project)
       expect(await readGlobalAgencyConfigText(currentTui)).not.toContain("local-agency")
 
@@ -587,12 +589,52 @@ describe("Agent Swarm terminal TUI e2e", () => {
       )
 
       const localRunBaseURL = await waitForLocalRunServerURL(project)
+      clearPrompt(currentTui)
+      currentTui.write("/connect")
+      await currentTui.waitFor(
+        () => commandLine(currentTui!.screen(), "/connect").includes("Connect to local agency-swarm server"),
+        "live /connect command suggestion",
+        tuiInteractionTimeoutMs,
+      )
+      currentTui.write("\r")
+      await currentTui.waitForText(localRunBaseURL, tuiInteractionTimeoutMs)
+      await currentTui.waitFor(
+        () => currentTui!.screen().includes(`● ${localRunBaseURL} Available`),
+        "current local server selected",
+        tuiInteractionTimeoutMs,
+      )
+      currentTui.write("\r")
+      await currentTui.waitForText(`Connected to ${localRunBaseURL}`, tuiInteractionTimeoutMs)
+      await waitForLocalRunSession(stateHome, project)
+      expect(await readGlobalAgencyConfigText(currentTui)).not.toContain(localRunBaseURL)
+
+      currentTui.write("same local server after connect\r")
+      await currentTui.waitForText(
+        "second repaired local run response: same local server after connect",
+        tuiInteractionTimeoutMs,
+      )
+      await currentTui.waitForText("recipient=entry-agent", tuiInteractionTimeoutMs)
+      await currentTui.waitFor(
+        () => hasCompletedRunTurn(currentTui!.history()) && !currentTui!.screen().includes("esc interrupt"),
+        "idle after same-server connect run",
+        tuiInteractionTimeoutMs,
+      )
+
       currentServer = await startAgencyProtocolServer()
       clearPrompt(currentTui)
       currentTui.write("/connect")
-      await currentTui.waitForText("/connect", tuiInteractionTimeoutMs)
+      await currentTui.waitFor(
+        () => commandLine(currentTui!.screen(), "/connect").includes("Connect to local agency-swarm server"),
+        "live /connect command suggestion",
+        tuiInteractionTimeoutMs,
+      )
       currentTui.write("\r")
       await currentTui.waitForText("Add local port", tuiInteractionTimeoutMs)
+      await currentTui.waitFor(
+        () => currentTui!.screen().includes(`${localRunBaseURL} Available`),
+        "current local server visible before external connect",
+        tuiInteractionTimeoutMs,
+      )
       currentTui.write("\x1b[B\r")
       await currentTui.waitForText("Add local Agency port", tuiInteractionTimeoutMs)
       currentTui.write(`${new URL(currentServer.baseURL).port}\r`)
@@ -609,6 +651,140 @@ describe("Agent Swarm terminal TUI e2e", () => {
       await expectNoLocalRunSession(stateHome, project)
     },
   )
+
+  unixTest("startup Build fallback keeps slash commands available from the repair prompt", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-slash-fallback-"))
+    const stateHome = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-slash-state-"))
+    tempDirs.push(project, stateHome)
+    await writeAgencyProject(project)
+    await writeBrokenLaunchVenvPython(project)
+    currentNativeServer = await startNativeLLMServer()
+
+    currentTui = await startTui({
+      cwd: packageRoot,
+      env: {
+        AGENTSWARM_LAUNCHER: "1",
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)),
+        XDG_STATE_HOME: stateHome,
+      },
+      args: [project],
+    })
+
+    await currentTui.waitForText("Use detected Agent Swarm project", tuiInteractionTimeoutMs)
+    currentTui.write("\r")
+    await currentTui.waitFor(
+      () => footerHasMode(currentTui!.screen(), "Build"),
+      "Build fallback footer",
+      tuiReadyTimeoutMs,
+    )
+    await currentTui.waitForText("Your agency project could not load.", tuiInteractionTimeoutMs)
+
+    currentTui.write("/agents\r")
+    await currentTui.waitFor(
+      () => hasAgentModeDialog(currentTui!.screen()),
+      "agent mode dialog",
+      tuiInteractionTimeoutMs,
+    )
+    expect(currentNativeServer.requests.some((request) => nativeRequestBody(request).includes("dotenv_missing"))).toBe(
+      false,
+    )
+    await expectNoLocalRunSession(stateHome, project)
+  })
+
+  unixTest("startup Build fallback opens for agency.py syntax errors", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-syntax-fallback-"))
+    const stateHome = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-syntax-state-"))
+    tempDirs.push(project, stateHome)
+    await writeAgencyProject(project)
+    await writeBrokenLaunchVenvPython(project, "syntax")
+    currentNativeServer = await startNativeLLMServer()
+
+    currentTui = await startTui({
+      cwd: packageRoot,
+      env: {
+        AGENTSWARM_LAUNCHER: "1",
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)),
+        XDG_STATE_HOME: stateHome,
+      },
+      args: [project],
+    })
+
+    await currentTui.waitForText("Use detected Agent Swarm project", tuiInteractionTimeoutMs)
+    currentTui.write("\r")
+    await currentTui.waitFor(
+      () => footerHasMode(currentTui!.screen(), "Build"),
+      "Build fallback footer",
+      tuiReadyTimeoutMs,
+    )
+    await currentTui.waitForText("Your agency project failed to start.", tuiInteractionTimeoutMs)
+    await currentTui.waitForText("SyntaxError: invalid syntax", tuiInteractionTimeoutMs)
+    await currentTui.waitForText("At: agency.py:1", tuiInteractionTimeoutMs)
+
+    currentTui.write("\r")
+    const request = await waitForNativeLLMRequest(currentTui, currentNativeServer, "SyntaxError: invalid syntax")
+    const body = nativeRequestBody(request)
+    expect(body).toContain("Fix this Agent Swarm startup error")
+    expect(body).toContain("Agent Swarm Build Instructions")
+    await expectNoLocalRunSession(stateHome, project)
+  })
+
+  unixTest("same-server /connect from Build fallback clears pending local Run startup", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-same-connect-"))
+    const stateHome = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-same-state-"))
+    tempDirs.push(project, stateHome)
+    await writeAgencyProject(project)
+    await writeBrokenLaunchVenvPython(project)
+    currentNativeServer = await startNativeLLMServer()
+    currentServer = await startAgencyProtocolServer()
+    const config = nativeOpenAIWithStaleAgencyConfig(currentNativeServer.baseURL)
+    config.provider["agency-swarm"].options.baseURL = currentServer.baseURL
+    config.provider["agency-swarm"].options.agency = "local-agency"
+
+    currentTui = await startTui({
+      cwd: packageRoot,
+      env: {
+        AGENTSWARM_LAUNCHER: "1",
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+        XDG_STATE_HOME: stateHome,
+      },
+      args: [project],
+    })
+
+    await currentTui.waitForText("Use detected Agent Swarm project", tuiInteractionTimeoutMs)
+    currentTui.write("\r")
+    await currentTui.waitFor(
+      () => footerHasMode(currentTui!.screen(), "Build"),
+      "Build fallback footer",
+      tuiReadyTimeoutMs,
+    )
+    await currentTui.waitForText("Your agency project could not load.", tuiInteractionTimeoutMs)
+    await expectNoLocalRunSession(stateHome, project)
+
+    currentTui.write("/connect")
+    await currentTui.waitFor(
+      () => commandLine(currentTui!.screen(), "/connect").includes("Connect to local agency-swarm server"),
+      "live /connect command suggestion",
+      tuiInteractionTimeoutMs,
+    )
+    currentTui.write("\r")
+    await currentTui.waitForText(currentServer.baseURL, tuiInteractionTimeoutMs)
+    await currentTui.waitFor(
+      () => currentTui!.screen().includes(`● ${currentServer!.baseURL} Available`),
+      "current external server selected",
+      tuiInteractionTimeoutMs,
+    )
+    currentTui.write("\r")
+    await currentTui.waitForText(`Connected to ${currentServer.baseURL}`, tuiInteractionTimeoutMs)
+
+    await selectProductMode(currentTui, "Run")
+    currentTui.write("same external connected fallback run\r")
+    await currentTui.waitFor(
+      () => currentServer!.requests.some((request) => request.body.message === "same external connected fallback run"),
+      "same external connected fallback Run request",
+      tuiInteractionTimeoutMs,
+    )
+    await expectNoLocalRunSession(stateHome, project)
+  })
 
   unixTest("external /connect from Build fallback is not overwritten by pending local Run startup", async () => {
     const project = await mkdtemp(path.join(os.tmpdir(), "agentswarm-startup-connect-fallback-"))
@@ -656,7 +832,11 @@ describe("Agent Swarm terminal TUI e2e", () => {
 
     clearPrompt(currentTui)
     currentTui.write("/connect")
-    await currentTui.waitForText("/connect", tuiInteractionTimeoutMs)
+    await currentTui.waitFor(
+      () => commandLine(currentTui!.screen(), "/connect").includes("Connect to local agency-swarm server"),
+      "live /connect command suggestion",
+      tuiInteractionTimeoutMs,
+    )
     currentTui.write("\r")
     await currentTui.waitForText("Add local port", tuiInteractionTimeoutMs)
     await currentTui.waitForText("Unavailable - current", tuiInteractionTimeoutMs)
@@ -3237,7 +3417,7 @@ async function dismissAgencyConnectDialog(tui: TuiProcess) {
   )
 }
 
-async function writeBrokenLaunchVenvPython(dir: string) {
+async function writeBrokenLaunchVenvPython(dir: string, failure: "import" | "syntax" = "import") {
   const python = path.join(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", "python")
   const fixed = path.join(dir, ".fixed")
   const server = path.join(dir, "fake-agency-server.js")
@@ -3298,9 +3478,18 @@ async function writeBrokenLaunchVenvPython(dir: string) {
       "Traceback (most recent call last):",
       '  File "/tmp/agentswarm-npx-test/launch_agency.py", line 1, in <module>',
       "    from agency import create_agency",
-      `  File "${entry}", line 1, in <module>`,
-      "    from dotenv_missing import load_dotenv",
-      "ModuleNotFoundError: No module named 'dotenv_missing'",
+      ...(failure === "syntax"
+        ? [
+            `  File "${entry}", line 1`,
+            "    def create_agency(:",
+            "                      ^",
+            "SyntaxError: invalid syntax",
+          ]
+        : [
+            `  File "${entry}", line 1, in <module>`,
+            "    from dotenv_missing import load_dotenv",
+            "ModuleNotFoundError: No module named 'dotenv_missing'",
+          ]),
       "TRACE",
       "  exit 1",
       "fi",
@@ -3317,6 +3506,26 @@ async function markBrokenLaunchFixed(dir: string) {
 
 async function writeRunVersion(dir: string, version: string) {
   await writeFile(path.join(dir, ".run-version"), `${version}\n`)
+}
+
+async function writeLocalRunRefreshManifest(dir: string) {
+  const uv = path.join(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", "uv")
+  const log = path.join(dir, ".uv-run-refresh-log")
+  await writeFile(path.join(dir, "requirements.txt"), "agency-swarm==1.9.6\n")
+  await writeFile(
+    uv,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
+      'if [[ "${1:-}" == "--version" ]]; then',
+      "  echo 'uv 0.8.0'",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  )
+  await chmod(uv, 0o755)
 }
 
 async function selectCurrentSwarm(tui: TuiProcess) {

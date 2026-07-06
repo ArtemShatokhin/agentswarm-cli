@@ -439,6 +439,41 @@ test("keeps generated local Run config process scoped while run project env is a
   }
 })
 
+test("does not load cached local Run config after run project env is cleared", async () => {
+  await using tmp = await tmpdir()
+  const prevConfig = Global.Path.config
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = tmp.path
+  delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await saveGlobal(localAgencyRunConfig("http://127.0.0.1:8123"))
+
+        delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+        delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+        await clear(true)
+
+        const config = await load()
+        expect(config.model).not.toBe("agency-swarm/default")
+        expect(config.provider?.["agency-swarm"]).toBeUndefined()
+      },
+    })
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
+    await clear(true)
+  }
+})
+
 test("preserves OPENCODE_CONFIG_CONTENT fields when local Run routing updates", async () => {
   await using tmp = await tmpdir()
   const prevConfig = Global.Path.config

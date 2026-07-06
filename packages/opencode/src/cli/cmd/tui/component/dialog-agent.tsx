@@ -18,6 +18,7 @@ import {
   resolveAgencyTargetFromPicker,
   resolveAgencyTargetSelection,
 } from "../util/agency-target"
+import { refreshAfterProviderAuth } from "../util/provider-auth-refresh"
 
 type AgentOptionValue =
   | {
@@ -366,7 +367,9 @@ export function DialogAgent() {
       process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] ??
       process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
     if (!directory) return
-    const launch = await prepareLocalProjectRunLaunch(directory, undefined, readRunPythonCommand())
+    const launch = await prepareLocalProjectRunLaunch(directory, undefined, readRunPythonCommand(), {
+      terminalUI: false,
+    })
     try {
       const current = sync.data.config as unknown as Config.Info
       const enabled = current.enabled_providers
@@ -396,12 +399,15 @@ export function DialogAgent() {
           throwOnError: true,
         },
       )
+      await refreshAfterProviderAuth({
+        sessionStatus: () => sync.data.session_status,
+        dispose: () => sdk.client.global.dispose({ throwOnError: true }),
+        bootstrap: () => sync.bootstrap(),
+      })
       process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = launch.runProjectDirectory
       process.env[AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(launch.runPythonCommand)
       delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
       delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
-      await sdk.client.global.dispose({ throwOnError: true })
-      await sync.bootstrap()
     } catch (error) {
       await cleanupLocalProjectRunLaunch()
       throw error

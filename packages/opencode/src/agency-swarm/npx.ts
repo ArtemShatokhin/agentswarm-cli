@@ -1094,6 +1094,9 @@ export async function prepareLocalProjectRunLaunch(
   directory: string,
   profile: ProductProfile = AgencyProduct,
   python?: string[],
+  options: {
+    terminalUI?: boolean
+  } = {},
 ): Promise<{
   directory: string
   runProjectDirectory: string
@@ -1109,7 +1112,9 @@ export async function prepareLocalProjectRunLaunch(
   if (!python && !existsSync(command[0] ?? "")) {
     throw new Error(`Project .venv is not ready. Use Build to repair it, then switch to Run again.`)
   }
-  await refreshLocalRunProjectDependencies(project.directory, command, launchProfile(profile))
+  await refreshLocalRunProjectDependencies(project.directory, command, launchProfile(profile), {
+    terminalUI: options.terminalUI ?? true,
+  })
   const server = await startProjectServer(project.directory, command, project.moduleName, project.agencyFile)
   const config = buildAgencyConfigData({
     baseURL: server.baseURL,
@@ -1132,6 +1137,9 @@ async function refreshLocalRunProjectDependencies(
   directory: string,
   command: string[],
   profile: Pick<LaunchProfile, "name" | "stateRoot">,
+  options: {
+    terminalUI: boolean
+  },
 ) {
   if (!isProjectVenvPythonCommand(directory, command)) return
   if (!(await hasDependencyManifest(directory))) return
@@ -1143,28 +1151,33 @@ async function refreshLocalRunProjectDependencies(
     "launcher Run refresh",
     profile,
   )
+  const refresh = async (signal?: AbortSignal) => {
+    const localUv = await ensureLocalUv(directory, venvPython, {
+      logFile: refreshLogFile,
+      signal,
+      timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
+    })
+    const result = await installProjectDependencies(directory, venvPython, localUv, {
+      logFile: refreshLogFile,
+      signal,
+      timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
+    })
+    if (result.timedOut) {
+      throw new Error(formatCommandTimeout(result, "Project dependency refresh", REBUILD_INSTALL_TIMEOUT_MS))
+    }
+    if (result.code !== 0) {
+      throw new Error(formatCommandFailure(result, "Project dependency refresh failed"))
+    }
+  }
+  if (!options.terminalUI) {
+    await refresh()
+    return
+  }
   await withSpinner(
     `Refreshing ${profile.name}`,
     `${profile.name} refresh checked`,
     `${profile.name} refresh failed`,
-    async (signal) => {
-      const localUv = await ensureLocalUv(directory, venvPython, {
-        logFile: refreshLogFile,
-        signal,
-        timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
-      })
-      const refresh = await installProjectDependencies(directory, venvPython, localUv, {
-        logFile: refreshLogFile,
-        signal,
-        timeoutMs: REBUILD_INSTALL_TIMEOUT_MS,
-      })
-      if (refresh.timedOut) {
-        throw new Error(formatCommandTimeout(refresh, "Project dependency refresh", REBUILD_INSTALL_TIMEOUT_MS))
-      }
-      if (refresh.code !== 0) {
-        throw new Error(formatCommandFailure(refresh, "Project dependency refresh failed"))
-      }
-    },
+    refresh,
   )
 }
 
@@ -1902,7 +1915,7 @@ function findProjectEntryFrame(stderr: string, entryFile: string) {
   const resolvedEntryFiles = equivalentResolvedPaths(entryFile)
   const entryName = escapeRegExp(path.basename(entryFile))
   for (let index = lines.length - 1; index >= 0; index--) {
-    const match = lines[index]?.match(new RegExp(`^\\s*File "([^"]*${entryName})", line (\\d+),`))
+    const match = lines[index]?.match(new RegExp(`^\\s*File "([^"]*${entryName})", line (\\d+)(?:,|$)`))
     if (!match) continue
     if (!resolvedEntryFiles.has(path.resolve(match[1] ?? ""))) continue
     return {

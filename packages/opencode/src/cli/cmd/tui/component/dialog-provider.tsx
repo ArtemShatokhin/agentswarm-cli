@@ -770,6 +770,20 @@ export function DialogAgencySwarmConnect() {
       return
     }
 
+    const sameServer = baseURL === current.baseURL
+    const activeLocalProject = Boolean(process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV])
+    if (sameServer && activeLocalProject) {
+      delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+      delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+      dialog.clear()
+      toast.show({
+        variant: "success",
+        message: `Connected to ${baseURL}`,
+        duration: 3000,
+      })
+      return
+    }
+
     const nextOptions = agencyConnectServerOptions({
       options: current.options,
       baseURL,
@@ -793,13 +807,15 @@ export function DialogAgencySwarmConnect() {
       },
       { throwOnError: true },
     )
-    delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
-    delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV]
+    if (!sameServer) {
+      delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+      delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV]
+    }
     delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
     delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
     await refreshAfterProviderAuth({
       sessionStatus: () => sync.data.session_status,
-      beforeDispose: baseURL === current.baseURL ? undefined : () => cleanupLocalProjectRunLaunch(),
+      beforeDispose: sameServer ? undefined : () => cleanupLocalProjectRunLaunch(),
       dispose: () => sdk.client.global.dispose({ throwOnError: true }),
       bootstrap: () => sync.bootstrap(),
     })

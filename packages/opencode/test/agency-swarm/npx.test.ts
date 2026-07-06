@@ -2596,6 +2596,75 @@ describe("agency-swarm npx onboarding", () => {
     expect(info).toHaveBeenCalledWith("Preparing Agent Swarm...")
   })
 
+  test("prepareProjectLaunch opens Build for agency.py syntax errors", async () => {
+    await using dir = await tmpdir()
+    await writeAgency(dir.path)
+    await writeVenvPython(dir.path)
+
+    const warn = spyOn(prompts.log, "warn").mockImplementation(() => undefined as never)
+    const traceback = [
+      "Traceback (most recent call last):",
+      '  File "/tmp/agentswarm-npx-test/launch_agency.py", line 1, in <module>',
+      "    from agency import create_agency",
+      `  File "${path.join(dir.path, "agency.py")}", line 1`,
+      "    def create_agency(:",
+      "                      ^",
+      "SyntaxError: invalid syntax",
+    ].join("\n")
+
+    spyOn(Bun, "spawn").mockImplementation((options: any) => {
+      const cmd = options?.cmd as string[] | undefined
+      if (!cmd) throw new Error("Missing command")
+      if (isUvVersionCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "uv 0.8.0\n",
+          stderr: "",
+        } as never
+      }
+      if (cmd.includes("import sys; print(sys.executable); print(sys.version.split()[0])")) {
+        const target = cmd[0] ?? ""
+        return {
+          exited: Promise.resolve(0),
+          stdout: `${target}\n3.12.7\n`,
+          stderr: "",
+        } as never
+      }
+      if (isUvPipInstallCommand(cmd) || isCanaryCommand(cmd)) {
+        return {
+          exited: Promise.resolve(0),
+          stdout: "",
+          stderr: "",
+        } as never
+      }
+      if (cmd[1]?.endsWith("launch_agency.py")) {
+        return {
+          exited: Promise.resolve(1),
+          stderr: traceback,
+          kill() {},
+        } as never
+      }
+      throw new Error(`Unexpected command: ${cmd.join(" ")}`)
+    })
+
+    const outcome = await prepareProjectLaunch({
+      directory: dir.path,
+      agencyFile: path.join(dir.path, "agency.py"),
+      moduleName: "agency",
+    })
+
+    expect(outcome).toMatchObject({
+      directory: dir.path,
+      productMode: "build",
+    })
+    expect(outcome?.startupFailure).toContain("Your agency project failed to start.")
+    expect(outcome?.startupFailure).toContain("SyntaxError: invalid syntax")
+    expect(outcome?.startupFailure).toContain("At: agency.py:1")
+    expect(outcome?.startupFailure).toContain("def create_agency(:")
+    expect(outcome?.startupFailure).toContain("Fix the error above in Build, then switch to Run.")
+    expect(warn).toHaveBeenCalledWith("Opening Build so you can fix this project.")
+  })
+
   test("prepareProjectLaunch keeps bridge failures outside the project entry as server failures", async () => {
     await using dir = await tmpdir()
     await writeAgency(dir.path)

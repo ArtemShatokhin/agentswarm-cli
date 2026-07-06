@@ -768,7 +768,12 @@ export const layer = Layer.effect(
           yield* mergePluginOrigins(dir, list)
         }
 
-        for (const configContent of [process.env.OPENCODE_CONFIG_CONTENT, agencySwarmRunConfigContent]) {
+        const useRunConfigContent = hasAgencySwarmRunProjectEnv()
+        if (!useRunConfigContent) agencySwarmRunConfigContent = undefined
+        for (const configContent of [
+          process.env.OPENCODE_CONFIG_CONTENT,
+          useRunConfigContent ? agencySwarmRunConfigContent : undefined,
+        ]) {
           if (!configContent) continue
           const source = "OPENCODE_CONFIG_CONTENT"
           const loaded = yield* loadConfig(configContent, {
