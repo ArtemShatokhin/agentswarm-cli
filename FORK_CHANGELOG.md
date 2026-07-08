@@ -327,7 +327,7 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
   - Behavior: a downstream starter profile can detect configured entry files and create the configured starter repository in the configured starter folder.
   - Behavior: `--prompt`, `--agent`, and explicit `agency-swarm/...` model launches skip onboarding.
   - Behavior: auto-project launch requires a detected Agency project.
-  - Behavior: if a detected local project has a ready Python environment but fails during project import or startup, the TUI opens Build with the startup error prefilled instead of exiting to the shell. After the user fixes the project, choosing Run from `/agents` starts the same local project.
+  - Behavior: if a detected local project has a ready Python environment but fails during project startup, the TUI opens Build with the startup error prefilled instead of exiting to the shell. After the user fixes the project, choosing Run from `/agents` starts the same local project.
   - Behavior: from that Build fallback, typing `/` keeps slash commands available by replacing the prefilled repair prompt instead of submitting the startup error text.
   - Behavior: stale Agency Swarm settings from `OPENCODE_CONFIG_CONTENT` cannot override the freshly prepared local Run server after startup falls back to Build.
   - Behavior: if the user connects to an external server from that Build fallback, choosing Run uses the connected server instead of replacing it with the pending local project.

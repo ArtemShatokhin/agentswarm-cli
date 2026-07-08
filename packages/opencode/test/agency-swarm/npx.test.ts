@@ -2589,7 +2589,7 @@ describe("agency-swarm npx onboarding", () => {
     expect(outcome?.startupFailure).toContain("At: agency.py:2")
     expect(outcome?.startupFailure).not.toContain("agency.py:99")
     expect(outcome?.startupFailure).toContain("import codex_missing_import_for_canary_test")
-    expect(outcome?.startupFailure).toContain("Fix the missing import or dependency in Build, then switch to Run.")
+    expect(outcome?.startupFailure).toContain("Fix this project in Build, then switch to Run.")
     expect(outcome?.startupFailure).not.toContain("Agency Swarm server exited with code 1")
     expect(success).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalledWith("Opening Build so you can fix this project.")
@@ -2661,7 +2661,7 @@ describe("agency-swarm npx onboarding", () => {
     expect(outcome?.startupFailure).toContain("SyntaxError: invalid syntax")
     expect(outcome?.startupFailure).toContain("At: agency.py:1")
     expect(outcome?.startupFailure).toContain("def create_agency(:")
-    expect(outcome?.startupFailure).toContain("Fix the error above in Build, then switch to Run.")
+    expect(outcome?.startupFailure).toContain("Fix this project in Build, then switch to Run.")
     expect(warn).toHaveBeenCalledWith("Opening Build so you can fix this project.")
   })
 

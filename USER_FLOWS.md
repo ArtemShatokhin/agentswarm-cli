@@ -235,7 +235,7 @@ For each failure scenario, capture the visible user result and cite the matching
 - **Happy-path proof:** Redo restore affordances stay hidden when the reverted turn or next redo target belongs to Run, while native Build redo stays available for native Build turns.
 - **User story:** After changing or repairing a swarm in Build, the user can return to Run in the same project and confirm the fixed swarm works.
 - **Success looks like:** Run uses the repaired swarm and gives a good response instead of staying on the earlier broken behavior.
-- **User story:** When restarting a project fails because the swarm code cannot import or start, the user lands in Build with the error already in the prompt.
+- **User story:** When restarting a project fails because the swarm code cannot load or start, the user lands in Build with the startup error already in the prompt.
 - **Success looks like:** The user can submit that prompt to Build, fix the code, choose Run from `/agents`, and start the same project as the Run server.
 - **Success looks like:** The user can type `/` from that Build fallback and access slash commands, even while the startup error is prefilled.
 - **Success looks like:** After choosing Run, the next prompt is handled by the repaired swarm, not echoed or ignored by the terminal.

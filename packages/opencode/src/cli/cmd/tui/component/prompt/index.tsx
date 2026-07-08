@@ -257,7 +257,7 @@ export function Prompt(props: PromptProps) {
   function startupFailurePromptInput() {
     const failure = args.startupFailure
     if (!failure) return
-    return ["Fix this Agent Swarm startup error:", "", failure].join("\n")
+    return ["Fix this startup error:", "", failure].join("\n")
   }
   function replaceStartupFailureSlashCommand(value: string) {
     const seed = startupFailurePromptInput()

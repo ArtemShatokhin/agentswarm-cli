@@ -1897,9 +1897,7 @@ function formatAgencyProjectStartupFailure(stderr: string, entryFile: string) {
   const title = importFailure ? "Your agency project could not load." : "Your agency project failed to start."
   const entryName = path.basename(entryFile)
   const location = `\nAt: ${entryName}:${frame.line}${frame.source ? `\n${frame.source}` : ""}`
-  const recovery = importFailure
-    ? "Fix the missing import or dependency in Build, then switch to Run."
-    : "Fix the error above in Build, then switch to Run."
+  const recovery = "Fix this project in Build, then switch to Run."
   return `${title}\n${exception}${location}\n${recovery}`
 }
 

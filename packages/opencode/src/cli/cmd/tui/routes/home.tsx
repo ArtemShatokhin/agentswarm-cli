@@ -42,7 +42,7 @@ export function Home() {
     }
     if (args.startupFailure) {
       r.set({
-        input: ["Fix this Agent Swarm startup error:", "", args.startupFailure].join("\n"),
+        input: ["Fix this startup error:", "", args.startupFailure].join("\n"),
         parts: [],
       })
       once = true
