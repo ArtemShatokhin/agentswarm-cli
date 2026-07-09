@@ -557,9 +557,9 @@ describe("Agent Swarm terminal TUI e2e", () => {
       await expectNoLocalRunSession(stateHome, project)
 
       await markBrokenLaunchFixed(project)
-      await writeLocalRunRefreshManifest(project)
+      await writeLocalRunRefreshManifest(project, 300)
       await writeRunVersion(project, "first repaired local run response")
-      await selectProductMode(currentTui, "Run")
+      await selectProductMode(currentTui, "Run", { expectStarting: true })
       currentTui.write("try fixed swarm from startup fallback\r")
       await currentTui.waitForText("first repaired local run response", tuiInteractionTimeoutMs)
       await currentTui.waitForText("recipient=entry-agent", tuiInteractionTimeoutMs)
@@ -3331,7 +3331,11 @@ async function selectRunTarget(tui: TuiProcess, query: string, successMessage: s
   await tui.waitForText(successMessage, tuiInteractionTimeoutMs)
 }
 
-async function selectProductMode(tui: TuiProcess, mode: "Build" | "Plan" | "Run") {
+async function selectProductMode(
+  tui: TuiProcess,
+  mode: "Build" | "Plan" | "Run",
+  options?: { expectStarting?: boolean },
+) {
   clearPrompt(tui)
   if (footerHasMode(tui.screen(), mode)) return
   tui.write("/agents\r")
@@ -3345,6 +3349,7 @@ async function selectProductMode(tui: TuiProcess, mode: "Build" | "Plan" | "Run"
     tuiInteractionTimeoutMs,
   )
   tui.write("\r")
+  if (options?.expectStarting) await tui.waitForText("Starting...", tuiInteractionTimeoutMs)
   await tui.waitFor(() => !tui.screen().includes("Select agent"), `${mode} mode selected`, tuiInteractionTimeoutMs)
   clearPrompt(tui)
 }
@@ -3508,7 +3513,7 @@ async function writeRunVersion(dir: string, version: string) {
   await writeFile(path.join(dir, ".run-version"), `${version}\n`)
 }
 
-async function writeLocalRunRefreshManifest(dir: string) {
+async function writeLocalRunRefreshManifest(dir: string, delayMs = 0) {
   const uv = path.join(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", "uv")
   const log = path.join(dir, ".uv-run-refresh-log")
   await writeFile(path.join(dir, "requirements.txt"), "agency-swarm==1.9.6\n")
@@ -3518,6 +3523,7 @@ async function writeLocalRunRefreshManifest(dir: string) {
       "#!/usr/bin/env bash",
       "set -euo pipefail",
       `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
+      ...(delayMs > 0 ? [`sleep ${delayMs / 1000}`] : []),
       'if [[ "${1:-}" == "--version" ]]; then',
       "  echo 'uv 0.8.0'",
       "fi",

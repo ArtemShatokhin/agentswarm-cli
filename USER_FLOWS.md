@@ -61,6 +61,7 @@ For each failure scenario, capture the visible user result and cite the matching
 - **Happy-path proof:** Launcher-managed `agency-swarm[fastapi,litellm]` is used only when no manifest exists.
 - **Happy-path proof:** Local `.venv` uv is used for launcher-managed fallback installs into `.venv`.
 - **Happy-path proof:** After Build changes dependency manifests, switching back to Run refreshes the existing project `.venv` before starting the local server.
+- **Happy-path proof:** While that switch to Run is starting the swarm, the TUI shows a visible starting state instead of looking frozen.
 - **Happy-path proof:** After that refresh and server start, the TUI still accepts the next Run prompt.
 - **Failure scenarios to test:** Missing Python 3.12+ produces a visible launcher failure.
 - **Failure scenarios to test:** Failed project imports after the Python environment is ready open Build instead of exiting, prefill the startup error, and let the user start Run from the same project after the fix.

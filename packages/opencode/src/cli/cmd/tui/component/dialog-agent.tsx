@@ -9,7 +9,7 @@ import { useSync } from "@tui/context/sync"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
 import { useToast } from "@tui/ui/toast"
-import { createMemo, createResource } from "solid-js"
+import { createMemo, createResource, createSignal } from "solid-js"
 import { DialogAgencySwarmConnect } from "./dialog-provider"
 import { isAgencySwarmFrameworkMode } from "../session-error"
 import {
@@ -74,6 +74,7 @@ export function DialogAgent() {
   const sdk = useSDK()
   const dialog = useDialog()
   const toast = useToast()
+  const [pendingMode, setPendingMode] = createSignal<ProductMode>()
 
   const currentModel = createMemo(() => local.model.current())
   const agencySwarmEnabled = createMemo(() =>
@@ -152,7 +153,8 @@ export function DialogAgent() {
                 mode: "run" as const,
               },
               title: "Run",
-              description: "Use the connected swarm",
+              description: pendingMode() === "run" ? "Starting the swarm..." : "Use the connected swarm",
+              footer: pendingMode() === "run" ? "Starting..." : undefined,
             },
           ]),
     ]
@@ -347,6 +349,8 @@ export function DialogAgent() {
   )
 
   async function setProductMode(mode: ProductMode) {
+    if (pendingMode()) return
+    setPendingMode(mode)
     try {
       if (mode === "run") {
         await prepareLocalRunProject()
@@ -359,6 +363,8 @@ export function DialogAgent() {
         message: error instanceof Error ? error.message : String(error),
         duration: 8000,
       })
+    } finally {
+      setPendingMode(undefined)
     }
   }
 
