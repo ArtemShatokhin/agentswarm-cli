@@ -8,6 +8,9 @@ import { AgencySwarmAdapter } from "./adapter"
 export namespace AgencySwarmRunSession {
   const log = Log.create({ service: "agency-swarm.run-session" })
   export const LOCAL_PROJECT_ENV = "AGENTSWARM_RUN_PROJECT"
+  export const LOCAL_PROJECT_PYTHON_ENV = "AGENTSWARM_RUN_PYTHON"
+  export const PENDING_LOCAL_PROJECT_ENV = "AGENTSWARM_PENDING_RUN_PROJECT"
+  export const PENDING_LOCAL_PROJECT_PYTHON_ENV = "AGENTSWARM_PENDING_RUN_PYTHON"
   export const PRODUCT_STATE_ROOT_ENV = "AGENTSWARM_PRODUCT_STATE_ROOT"
   const PROVIDER_ID = "agency-swarm"
 

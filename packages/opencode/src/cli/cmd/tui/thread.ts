@@ -17,6 +17,7 @@ import { Instance } from "@/project/instance"
 import { writeHeapSnapshot } from "v8"
 import { AgencyProduct } from "@/agency-swarm/product"
 import {
+  cleanupLocalProjectRunLaunch,
   isNpxCwdLaunch,
   prepareNpxLaunch,
   prepareProjectLaunch,
@@ -180,6 +181,19 @@ export const TuiThreadCommand = cmd({
       if (prepared?.runProjectDirectory) {
         process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = Filesystem.resolve(prepared.runProjectDirectory)
       }
+      if (prepared?.runPythonCommand) {
+        process.env[AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(prepared.runPythonCommand)
+      }
+      if (prepared?.pendingRunProjectDirectory) {
+        process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = Filesystem.resolve(
+          prepared.pendingRunProjectDirectory,
+        )
+      }
+      if (prepared?.pendingRunPythonCommand) {
+        process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(
+          prepared.pendingRunPythonCommand,
+        )
+      }
       const next = prepared?.directory ? Filesystem.resolve(prepared.directory) : selectedProject
       const file = await target()
       try {
@@ -298,6 +312,8 @@ export const TuiThreadCommand = cmd({
             agent: args.agent,
             model: args.model,
             prompt,
+            productMode: prepared?.productMode,
+            startupFailure: prepared?.startupFailure,
             fork: args.fork,
           },
         })
@@ -306,8 +322,12 @@ export const TuiThreadCommand = cmd({
       }
     } finally {
       try {
-        if (cleanup) {
-          await cleanup()
+        try {
+          if (cleanup) {
+            await cleanup()
+          }
+        } finally {
+          await cleanupLocalProjectRunLaunch()
         }
       } finally {
         unguard?.()

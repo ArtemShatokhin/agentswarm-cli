@@ -4,6 +4,8 @@ export interface Args {
   model?: string
   agent?: string
   prompt?: string
+  productMode?: "build"
+  startupFailure?: string
   continue?: boolean
   sessionID?: string
   fork?: boolean

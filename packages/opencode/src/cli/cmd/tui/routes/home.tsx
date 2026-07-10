@@ -40,6 +40,14 @@ export function Home() {
       once = true
       return
     }
+    if (args.startupFailure) {
+      r.set({
+        input: ["Fix this startup error:", "", args.startupFailure].join("\n"),
+        parts: [],
+      })
+      once = true
+      return
+    }
     if (!args.prompt) return
     r.set({ input: args.prompt, parts: [] })
     once = true

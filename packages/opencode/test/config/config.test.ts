@@ -31,6 +31,7 @@ import { ProjectID } from "../../src/project/schema"
 import { Filesystem } from "@/util/filesystem"
 import { ConfigPlugin } from "@/config/plugin"
 import { Npm } from "@opencode-ai/core/npm"
+import { AgencySwarmRunSession } from "@/agency-swarm/run-session"
 
 const emptyAccount = Layer.mock(Account.Service)({
   active: () => Effect.succeed(Option.none()),
@@ -100,6 +101,24 @@ async function writeManagedSettings(settings: object, filename = "opencode.json"
 
 async function writeConfig(dir: string, config: object, name = "opencode.json") {
   await Filesystem.write(path.join(dir, name), JSON.stringify(config))
+}
+
+function localAgencyRunConfig(baseURL: string, options: Record<string, unknown> = {}): Config.Info {
+  return {
+    model: "agency-swarm/default",
+    provider: {
+      "agency-swarm": {
+        name: "Agency Swarm",
+        options: {
+          baseURL,
+          agency: "local-agency",
+          discoveryTimeoutMs: 2000,
+          timeout: false,
+          ...options,
+        },
+      },
+    },
+  }
 }
 
 async function check(map: (dir: string) => string) {
@@ -391,6 +410,301 @@ test("updates global config and omits empty shell key in jsonc", async () => {
     expect(parsed.model).toBe("test/model")
   } finally {
     ;(Global.Path as { config: string }).config = prev
+    await clear(true)
+  }
+})
+
+test("keeps generated local Run config process scoped while run project env is active", async () => {
+  await using tmp = await tmpdir()
+  const prevConfig = Global.Path.config
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = tmp.path
+  delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    const saved = await saveGlobal(localAgencyRunConfig("http://127.0.0.1:8123"))
+
+    expect(saved.provider?.["agency-swarm"]?.options?.baseURL).toBe("http://127.0.0.1:8123")
+    expect(await fs.readdir(tmp.path)).toEqual([])
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
+    await clear(true)
+  }
+})
+
+test("does not load cached local Run config after run project env is cleared", async () => {
+  await using tmp = await tmpdir()
+  const prevConfig = Global.Path.config
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = tmp.path
+  delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await saveGlobal(localAgencyRunConfig("http://127.0.0.1:8123"))
+
+        delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+        delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+        await clear(true)
+
+        const config = await load()
+        expect(config.model).not.toBe("agency-swarm/default")
+        expect(config.provider?.["agency-swarm"]).toBeUndefined()
+      },
+    })
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
+    await clear(true)
+  }
+})
+
+test("preserves OPENCODE_CONFIG_CONTENT fields when local Run routing updates", async () => {
+  await using tmp = await tmpdir()
+  const prevConfig = Global.Path.config
+  const prevContent = process.env.OPENCODE_CONFIG_CONTENT
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+    agent: {
+      build: {
+        model: "openai/native-model",
+        prompt: "Native build prompt",
+      },
+    },
+    provider: {
+      openai: {
+        name: "Native Provider",
+        options: {
+          apiKey: "env-key",
+        },
+        models: {
+          "native-model": {
+            name: "Native Model",
+          },
+        },
+      },
+    },
+  })
+  process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = tmp.path
+  delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await saveGlobal(localAgencyRunConfig("http://127.0.0.1:8123"))
+
+        const config = await load()
+        expect(config.model).toBe("agency-swarm/default")
+        expect(config.provider?.["agency-swarm"]?.options?.baseURL).toBe("http://127.0.0.1:8123")
+        expect(config.provider?.openai?.options?.apiKey).toBe("env-key")
+        expect(config.provider?.openai?.models?.["native-model"]?.name).toBe("Native Model")
+        expect(config.agent?.build?.prompt).toBe("Native build prompt")
+      },
+    })
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT
+    else process.env.OPENCODE_CONFIG_CONTENT = prevContent
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
+    await clear(true)
+  }
+})
+
+test("ignores stale OPENCODE_CONFIG_CONTENT model when rerouting Agency Swarm config", async () => {
+  await using tmp = await tmpdir()
+  const prevConfig = Global.Path.config
+  const prevContent = process.env.OPENCODE_CONFIG_CONTENT
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+    model: "openai/stale-native-model",
+    provider: {
+      "agency-swarm": {
+        name: "Stale Agency Swarm",
+        options: {
+          baseURL: "http://127.0.0.1:7000",
+          agency: "local-agency",
+        },
+      },
+      openai: {
+        name: "Native Provider",
+        options: {
+          apiKey: "env-key",
+        },
+      },
+    },
+  })
+  delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await saveGlobal({
+          model: "agency-swarm/default",
+          provider: {
+            "agency-swarm": {
+              name: "Agency Swarm",
+              options: {
+                baseURL: "http://127.0.0.1:8123",
+                agency: "connected-agency",
+              },
+            },
+          },
+        })
+
+        const config = await load()
+        expect(config.model).toBe("agency-swarm/default")
+        expect(config.provider?.["agency-swarm"]?.options?.baseURL).toBe("http://127.0.0.1:8123")
+        expect(config.provider?.["agency-swarm"]?.options?.agency).toBe("connected-agency")
+        expect(config.provider?.openai?.options?.apiKey).toBe("env-key")
+      },
+    })
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT
+    else process.env.OPENCODE_CONFIG_CONTENT = prevContent
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
+    await clear(true)
+  }
+})
+
+test("does not cache non-routing fields from generated local Run config", async () => {
+  await using tmp = await tmpdir()
+  const prevConfig = Global.Path.config
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = tmp.path
+  delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const run = localAgencyRunConfig("http://127.0.0.1:8123")
+        await saveGlobal({
+          ...run,
+          agent: {
+            build: {
+              model: "openai/old-model",
+              prompt: "Stale build prompt",
+            },
+          },
+          provider: {
+            ...run.provider,
+            openai: {
+              name: "Old Native Provider",
+              options: {
+                apiKey: "old-key",
+              },
+            },
+          },
+          enabled_providers: ["openai", "agency-swarm"],
+          disabled_providers: ["anthropic"],
+        })
+
+        await saveGlobal({
+          agent: {
+            build: {
+              model: "anthropic/new-model",
+              prompt: "Fresh build prompt",
+            },
+          },
+          provider: {
+            anthropic: {
+              name: "Fresh Native Provider",
+              options: {
+                apiKey: "new-key",
+              },
+            },
+          },
+          enabled_providers: ["anthropic"],
+          disabled_providers: ["openai"],
+        })
+
+        const config = await load()
+        expect(config.model).toBe("agency-swarm/default")
+        expect(config.provider?.["agency-swarm"]?.options?.baseURL).toBe("http://127.0.0.1:8123")
+        expect(config.agent?.build?.prompt).toBe("Fresh build prompt")
+        expect(config.provider?.openai).toBeUndefined()
+        expect(config.provider?.anthropic?.options?.apiKey).toBe("new-key")
+        expect(config.enabled_providers).toEqual(["anthropic", "agency-swarm"])
+        expect(config.disabled_providers).toEqual(["openai"])
+      },
+    })
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
+    await clear(true)
+  }
+})
+
+test("persists explicit loopback local-agency config while run project env is active", async () => {
+  await using tmp = await tmpdir()
+  const baseURL = "http://127.0.0.1:8123"
+  const prevConfig = Global.Path.config
+  const prevRunProject = process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+  const prevPendingRunProject = process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  ;(Global.Path as { config: string }).config = tmp.path
+  process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = tmp.path
+  delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+  await clear(true)
+
+  try {
+    await saveGlobal(
+      localAgencyRunConfig(baseURL, {
+        localServers: [baseURL],
+      }),
+    )
+
+    const files = await fs.readdir(tmp.path)
+    expect(files).toHaveLength(1)
+    const file = path.join(tmp.path, files[0]!)
+    const written = await Filesystem.readText(file)
+    const parsed = ConfigParse.schema(Config.Info, ConfigParse.jsonc(written, file), file)
+    const options = parsed.provider?.["agency-swarm"]?.options
+    expect(options?.baseURL).toBe(baseURL)
+    expect(options?.agency).toBe("local-agency")
+    expect(options?.localServers).toEqual([baseURL])
+  } finally {
+    ;(Global.Path as { config: string }).config = prevConfig
+    if (prevRunProject === undefined) delete process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = prevRunProject
+    if (prevPendingRunProject === undefined) delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+    else process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] = prevPendingRunProject
     await clear(true)
   }
 })

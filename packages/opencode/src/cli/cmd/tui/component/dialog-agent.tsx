@@ -1,12 +1,15 @@
 import { AgencySwarmAdapter } from "@/agency-swarm/adapter"
+import { cleanupLocalProjectRunLaunch, prepareLocalProjectRunLaunch } from "@/agency-swarm/npx"
+import { AgencySwarmRunSession } from "@/agency-swarm/run-session"
 import { displayAgentName } from "@/agent/display"
-import { useLocal } from "@tui/context/local"
+import { Config } from "@/config"
+import { useLocal, type ProductMode } from "@tui/context/local"
 import { useSDK } from "@tui/context/sdk"
 import { useSync } from "@tui/context/sync"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
 import { useToast } from "@tui/ui/toast"
-import { createMemo, createResource } from "solid-js"
+import { createMemo, createResource, createSignal } from "solid-js"
 import { DialogAgencySwarmConnect } from "./dialog-provider"
 import { isAgencySwarmFrameworkMode } from "../session-error"
 import {
@@ -15,8 +18,13 @@ import {
   resolveAgencyTargetFromPicker,
   resolveAgencyTargetSelection,
 } from "../util/agency-target"
+import { refreshAfterProviderAuth } from "../util/provider-auth-refresh"
 
 type AgentOptionValue =
+  | {
+      kind: "mode"
+      mode: ProductMode
+    }
   | {
       kind: "local"
       agent: string
@@ -34,12 +42,39 @@ type AgentOptionValue =
       kind: "connect"
     }
 
+type ProviderConfig = NonNullable<Config.Info["provider"]>[string]
+
+function mergeLocalRunProvider(input: { current?: ProviderConfig; launch?: ProviderConfig }) {
+  if (!input.launch) return input.current
+
+  const options = { ...(input.launch.options ?? {}) }
+  const currentOptions = input.current?.options
+  const launchAgency = input.launch.options?.["agency"]
+  if (currentOptions && currentOptions["agency"] === launchAgency) {
+    for (const key of [
+      "recipientAgent",
+      "recipientAgentSelectedAt",
+      "recipient_agent",
+      "recipient_agent_selected_at",
+    ] as const) {
+      if (Object.hasOwn(currentOptions, key)) options[key] = currentOptions[key]
+    }
+  }
+
+  return {
+    ...input.current,
+    ...input.launch,
+    options,
+  }
+}
+
 export function DialogAgent() {
   const local = useLocal()
   const sync = useSync()
   const sdk = useSDK()
   const dialog = useDialog()
   const toast = useToast()
+  const [pendingMode, setPendingMode] = createSignal<ProductMode>()
 
   const currentModel = createMemo(() => local.model.current())
   const agencySwarmEnabled = createMemo(() =>
@@ -91,20 +126,59 @@ export function DialogAgent() {
   )
 
   const options = createMemo<DialogSelectOption<AgentOptionValue>[]>(() => {
+    const product = local.product.current()
+    const modes: DialogSelectOption<AgentOptionValue>[] = [
+      {
+        value: {
+          kind: "mode",
+          mode: "plan",
+        },
+        title: "Plan",
+        description: "Plan work before building",
+      },
+      {
+        value: {
+          kind: "mode",
+          mode: "build",
+        },
+        title: "Build",
+        description: "Agent Builder for swarms and agents",
+      },
+      ...(product === "run"
+        ? []
+        : [
+            {
+              value: {
+                kind: "mode" as const,
+                mode: "run" as const,
+              },
+              title: "Run",
+              description: pendingMode() === "run" ? "Starting the swarm..." : "Use the connected swarm",
+              footer: pendingMode() === "run" ? "Starting..." : undefined,
+            },
+          ]),
+    ]
+
     if (!agencySwarmEnabled()) {
-      return local.agent.list().map((item) => {
-        return {
-          value: {
-            kind: "local",
-            agent: item.name,
-          } as AgentOptionValue,
-          title: displayAgentName(item.name),
-          description: item.native ? "native" : item.description,
-        }
-      })
+      return [
+        ...modes,
+        ...local.agent
+          .list()
+          .filter((item) => item.name !== "build" && item.name !== "plan")
+          .map((item) => {
+            return {
+              value: {
+                kind: "local",
+                agent: item.name,
+              } as AgentOptionValue,
+              title: displayAgentName(item.name),
+              description: item.native ? "native" : item.description,
+            }
+          }),
+      ]
     }
 
-    const result: DialogSelectOption<AgentOptionValue>[] = []
+    const result: DialogSelectOption<AgentOptionValue>[] = [...modes]
     const discovered = discovery()
     const error = discovered?.error
 
@@ -172,7 +246,7 @@ export function DialogAgent() {
       }
     }
 
-    if (result.length === 0) {
+    if (result.length === modes.length) {
       result.push({
         value: {
           kind: "agency",
@@ -189,14 +263,26 @@ export function DialogAgent() {
   })
 
   const current = createMemo<AgentOptionValue | undefined>(() => {
-    if (!agencySwarmEnabled()) {
-      const product = local.product?.current()
-      const agent = local.agent.current()?.name
+    const product = local.product?.current()
+    const agent = local.agent.current()?.name
+    if (!agencySwarmEnabled() && agent && agent !== "build" && agent !== "plan") {
       return {
         kind: "local",
-        agent: (product === "build" || product === "plan") && (!agent || agent === "build" || agent === "plan")
-          ? product
-          : (agent ?? "build"),
+        agent,
+      }
+    }
+
+    if (product === "build" || product === "plan") {
+      return {
+        kind: "mode",
+        mode: product,
+      }
+    }
+
+    if (!agencySwarmEnabled()) {
+      return {
+        kind: "local",
+        agent: agent ?? "build",
       }
     }
 
@@ -231,18 +317,16 @@ export function DialogAgent() {
 
   return (
     <DialogSelect
-      title={agencySwarmEnabled() ? "Select swarm" : "Select agent"}
+      title="Select agent"
       current={current()}
       options={options()}
       onSelect={(option) => {
+        if (option.value.kind === "mode") {
+          void setProductMode(option.value.mode)
+          return
+        }
+
         if (option.value.kind === "local") {
-          if (option.value.agent === "build" || option.value.agent === "plan") {
-            void local.product.set(option.value.agent).then(
-              () => dialog.clear(),
-              () => dialog.clear(),
-            )
-            return
-          }
           local.agent.set(option.value.agent)
           dialog.clear()
           return
@@ -263,6 +347,93 @@ export function DialogAgent() {
       }}
     />
   )
+
+  async function setProductMode(mode: ProductMode) {
+    if (pendingMode()) return
+    setPendingMode(mode)
+    try {
+      if (mode === "run") {
+        await prepareLocalRunProject()
+      }
+      await local.product.set(mode)
+      dialog.clear()
+    } catch (error) {
+      toast.show({
+        variant: "error",
+        message: error instanceof Error ? error.message : String(error),
+        duration: 8000,
+      })
+    } finally {
+      setPendingMode(undefined)
+    }
+  }
+
+  async function prepareLocalRunProject() {
+    const directory =
+      process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV] ??
+      process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV]
+    if (!directory) return
+    const launch = await prepareLocalProjectRunLaunch(directory, undefined, readRunPythonCommand(), {
+      terminalUI: false,
+    })
+    try {
+      const current = sync.data.config as unknown as Config.Info
+      const enabled = current.enabled_providers
+        ? Array.from(new Set([...current.enabled_providers, AgencySwarmAdapter.PROVIDER_ID]))
+        : undefined
+      const disabled = current.disabled_providers?.filter((item) => item !== AgencySwarmAdapter.PROVIDER_ID)
+      const provider = { ...(current.provider ?? {}) }
+      const agencyProvider = mergeLocalRunProvider({
+        current: current.provider?.[AgencySwarmAdapter.PROVIDER_ID],
+        launch: launch.config.provider?.[AgencySwarmAdapter.PROVIDER_ID],
+      })
+      if (agencyProvider) provider[AgencySwarmAdapter.PROVIDER_ID] = agencyProvider
+      const config = {
+        ...current,
+        ...launch.config,
+        provider: {
+          ...provider,
+        },
+        ...(enabled ? { enabled_providers: enabled } : {}),
+        ...(disabled ? { disabled_providers: disabled } : {}),
+      } satisfies Config.Info
+      await sdk.client.global.config.update(
+        {
+          config,
+        },
+        {
+          throwOnError: true,
+        },
+      )
+      await refreshAfterProviderAuth({
+        sessionStatus: () => sync.data.session_status,
+        dispose: () => sdk.client.global.dispose({ throwOnError: true }),
+        bootstrap: () => sync.bootstrap(),
+      })
+      process.env[AgencySwarmRunSession.LOCAL_PROJECT_ENV] = launch.runProjectDirectory
+      process.env[AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV] = JSON.stringify(launch.runPythonCommand)
+      delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_ENV]
+      delete process.env[AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV]
+    } catch (error) {
+      await cleanupLocalProjectRunLaunch()
+      throw error
+    }
+  }
+
+  function readRunPythonCommand() {
+    return (
+      readRunPythonCommandEnv(AgencySwarmRunSession.PENDING_LOCAL_PROJECT_PYTHON_ENV) ??
+      readRunPythonCommandEnv(AgencySwarmRunSession.LOCAL_PROJECT_PYTHON_ENV)
+    )
+  }
+
+  function readRunPythonCommandEnv(name: string) {
+    const value = process.env[name]
+    if (!value) return
+    const parsed: unknown = JSON.parse(value)
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string")) return parsed
+    throw new Error("Agent Swarm Python command is invalid. Restart Agent Swarm and try Run again.")
+  }
 
   async function setAgencySwarmTarget(value: Extract<AgentOptionValue, { kind: "agency" | "recipient" }>) {
     const options = providerOptions()

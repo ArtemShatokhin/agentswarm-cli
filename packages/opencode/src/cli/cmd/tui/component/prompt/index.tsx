@@ -254,6 +254,23 @@ export function Prompt(props: PromptProps) {
       agentModel: local.agent.current()?.model,
     }),
   )
+  function startupFailurePromptInput() {
+    const failure = args.startupFailure
+    if (!failure) return
+    return ["Fix this startup error:", "", failure].join("\n")
+  }
+  function replaceStartupFailureSlashCommand(value: string) {
+    const seed = startupFailurePromptInput()
+    if (!seed) return value
+    if (value === seed) return value
+    for (const match of value.matchAll(/\/\S*/g)) {
+      const index = match.index
+      if (index === undefined) continue
+      const slash = match[0]
+      if (value.slice(0, index) + value.slice(index + slash.length) === seed) return slash
+    }
+    return value
+  }
   function firstNativeModel() {
     const hasModel = (model: { providerID: string; modelID: string }) =>
       Boolean(sync.data.provider.find((provider) => provider.id === model.providerID)?.models[model.modelID])
@@ -2183,7 +2200,13 @@ export function Prompt(props: PromptProps) {
               minHeight={1}
               maxHeight={6}
               onContentChange={() => {
-                const value = input.plainText
+                let value = input.plainText
+                const next = replaceStartupFailureSlashCommand(value)
+                if (next !== value) {
+                  input.setText(next)
+                  input.gotoBufferEnd()
+                  value = next
+                }
                 setStore("prompt", "input", value)
                 auto()?.onInput(value)
                 syncExtmarksWithPromptParts()

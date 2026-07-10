@@ -13,7 +13,7 @@ When a change is suspicious, unproven, not clearly fork-specific, or not clearly
 - `/auth` is the credentials flow, not a product mode switch.
 - `/models` chooses the LLM config passed to Agency Swarm, not a product mode switch.
 - Upstream OpenCode provider/model state may still exist internally for auth and LLM choice, but it must not pull the user out of Run mode by accident.
-- `/modes` is the product mode switch. It exposes Plan, Build, and Run without adding `/build` or `/plan` commands.
+- `/agents` is the product mode and agent switch. It exposes Plan, Build, and Run without adding `/build` or `/plan` commands.
 - Build and Plan rely on native OpenCode behavior plus fork-specific Agent Swarm instructions. Run is the Agency Swarm server-backed mode.
 - Bug-like changes are not product features. Compare them against upstream, find the root cause, reduce divergence, and avoid fork-only workarounds.
 - Install, launcher, and package behavior count as user experience and belong in this file when they are intentional fork behavior.
@@ -28,7 +28,7 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
 - Downstream product profile: `packages/opencode/src/agency-swarm/product.ts`, `packages/opencode/src/agency-swarm/npx.ts`, `packages/opencode/src/cli/cmd/tui/util/env-file.ts`, `packages/opencode/src/agency-swarm/server-launcher.ts`, `packages/opencode/src/installation/distribution.ts`, `packages/opencode/script/build.ts`.
 - Local project setup, starter creation, and onboarding auto-launch: `packages/opencode/src/agency-swarm/npx.ts`, `packages/opencode/src/cli/cmd/tui/thread.ts`, `packages/opencode/src/cli/cmd/tui/app.tsx`, `packages/opencode/src/cli/cmd/tui/routes/home.tsx`.
 - Agency session resume and bridge recovery: `packages/opencode/src/agency-swarm/run-session.ts`, `packages/opencode/src/agency-swarm/npx.ts`, `packages/opencode/src/session/agency-swarm.ts`, `packages/opencode/src/cli/cmd/tui/session-error.ts`, `packages/opencode/src/cli/cmd/tui/context/agency-swarm-connection.tsx`.
-- Connection, auth, mode, and provider dialogs: `packages/opencode/src/cli/cmd/tui/app.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-mode.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx`, `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`, `packages/opencode/src/cli/cmd/tui/session-error.ts`.
+- Connection, auth, mode, and provider dialogs: `packages/opencode/src/cli/cmd/tui/app.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx`, `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`, `packages/opencode/src/cli/cmd/tui/session-error.ts`.
 - Run-mode routing, add-ons, models, and attachments: `packages/opencode/src/agency-swarm/adapter.ts`, `packages/opencode/src/session/agency-swarm.ts`, `packages/opencode/src/cli/cmd/tui/component/prompt/autocomplete.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx`, `packages/opencode/src/cli/cmd/tui/context/local.tsx`, `packages/opencode/src/cli/cmd/tui/util/agency-target.ts`.
 - Run-mode local models: `packages/opencode/src/agency-swarm/ollama.ts`, `packages/opencode/src/agency-swarm/litellm-provider.ts`, `packages/opencode/src/agency-swarm/client-config.ts`, `packages/opencode/src/provider/provider.ts`, `packages/opencode/src/cli/cmd/tui/component/download-ollama-model.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx`, `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`, `packages/opencode/src/cli/cmd/tui/session-error.ts`.
 - Build and Plan instruction preservation: `packages/opencode/src/session/agent-builder.ts`, `packages/opencode/src/session/agent-planner.ts`, `packages/opencode/src/session/prompt/agent-builder.txt`, `packages/opencode/src/session/prompt/agent-planner.txt`.
@@ -241,25 +241,31 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
   - Implementation: `agentPlannerInstructions` in `packages/opencode/src/session/agent-planner.ts` with `packages/opencode/src/session/prompt/agent-planner.txt`.
   - Added by: `7643fcde`
 
-- **`/modes` exposes Plan, Build, and Run**
+- **`/agents` exposes Plan, Build, and Run**
   - Intent: let users move between native Build, native Plan, and server-backed Run inside one project without adding parallel Build or Plan behavior.
-  - Behavior: `/modes` switches product mode and lists choices in work order: Plan, Build, Run. Build selects the native `build` agent, Plan selects the native `plan` agent, and Run keeps prompts server-backed through Agency Swarm. `/build` and `/plan` are not slash commands.
+  - Behavior: `/agents` switches product mode and lists choices in work order. Outside Run, it lists Plan, Build, and Run before native agent choices. In Run, it lists Plan and Build before live swarm and agent choices. Build selects the native `build` agent, Plan selects the native `plan` agent, and Run keeps prompts server-backed through Agency Swarm.
   - Behavior: leaving Run stops prompt routing through the Agency Swarm backend but preserves the saved Run target for the session; returning to Run reconnects to or keeps using the configured Agency Swarm server.
+  - Behavior: returning to local-project Run after Build relaunches from current project files, refreshes manifest dependencies into the project `.venv`, and preserves the selected local Run target.
+  - Behavior: while the local Run switch starts the swarm, `/agents` shows a visible starting state instead of leaving the picker looking frozen.
+  - Behavior: dependency refresh during an in-TUI switch back to Run does not use launcher terminal spinners, so keyboard input remains owned by the TUI after the local server starts.
+  - Behavior: if manifest dependency refresh fails while returning to Run, the local server does not start with stale packages.
+  - Behavior: selecting the already-current local Run server in `/connect` is a no-op that preserves local project state instead of persisting a stale random port. Selecting the already-current external server from Build fallback clears pending local repair state so Run stays external.
   - Behavior: Build and Plan prompts, commands, shell turns, and compaction turns persist native routing metadata so reopened sessions do not silently fall back to Run.
   - Behavior: reopened Plan sessions keep Plan selected in `/agents` instead of using a stale Build default.
   - Behavior: compaction created in Build or Plan keeps native routing metadata so `/compact`, auto-compaction, and direct continuation do not switch the session back to server-backed Run.
-  - Behavior: Plan mode submits through the native `plan` agent while Plan is selected; choosing another local agent moves the turn back to native Build behavior instead of silently submitting to a different agent than the UI shows.
+  - Behavior: Plan mode submits through the native `plan` agent while Plan is selected; choosing another OpenCode agent moves the turn back to native Build behavior instead of silently submitting to a different agent than the UI shows.
   - Behavior: when Plan finishes and the user approves the native handoff question, the TUI switches to Build using the upstream OpenCode Plan approval path.
+  - Behavior: transient empty question-recovery responses do not permanently close a still-pending Plan approval question.
   - Behavior: the Plan approval question owns keyboard input while visible, so base session shortcuts do not fire during the question.
   - Behavior: mixed-mode histories keep completed turn labels tied to the mode that handled each turn, including older Run turns without stored mode metadata.
   - Behavior: message actions use the selected turn's stored or legacy-inferred Run/native routing metadata, so mode switching does not hide or expose Revert for the wrong turn.
   - Behavior: Redo restore affordances are hidden when the reverted turn or next redo target belongs to Run, while native Build redo stays available for native Build history.
-  - Implementation: product mode state in `packages/opencode/src/cli/cmd/tui/context/local.tsx`, `DialogMode` in `packages/opencode/src/cli/cmd/tui/component/dialog-mode.tsx`, framework-mode gates in `packages/opencode/src/cli/cmd/tui/session-error.ts`, native routing metadata in `packages/opencode/src/session/prompt.ts` and `packages/opencode/src/session/compaction.ts`, selected-turn message actions in `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx`, redo gating in `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`, and upstream-aligned question keymap isolation in `packages/opencode/src/cli/cmd/tui/keymap.tsx` and `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx`.
+  - Implementation: product mode state in `packages/opencode/src/cli/cmd/tui/context/local.tsx`, `DialogAgent` in `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, framework-mode gates in `packages/opencode/src/cli/cmd/tui/session-error.ts`, native routing metadata in `packages/opencode/src/session/prompt.ts` and `packages/opencode/src/session/compaction.ts`, selected-turn message actions in `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx`, redo gating in `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`, and upstream-aligned question keymap isolation in `packages/opencode/src/cli/cmd/tui/keymap.tsx` and `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx`.
   - Added by: `d6b9ed38`, PR #300
 
-- **Tab switches native agents outside Run and swarm agents in Run**
-  - Intent: preserve upstream native agent cycling while keeping fast target switching during run sessions.
-  - Behavior: pressing Tab in Run mode cycles through available Agency Swarm targets. In Build and Plan, Tab keeps the native OpenCode local-agent cycle behavior.
+- **Tab toggles Build and Plan outside Run and switches swarm agents in Run**
+  - Intent: keep fast switching among active work surfaces without letting Tab enter server-backed Run by accident.
+  - Behavior: pressing Tab in Run mode cycles through available Agency Swarm targets. In Build and Plan, Tab toggles between Build and Plan and never enters Run.
   - Implementation: `cycleAgencyRunTarget` in `packages/opencode/src/cli/cmd/tui/app.tsx` and `cycleAgencyTargetSelection` in `packages/opencode/src/cli/cmd/tui/util/agency-target.ts`.
   - Added by: `d6b9ed38`
 
@@ -322,8 +328,13 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
   - Behavior: a downstream starter profile can detect configured entry files and create the configured starter repository in the configured starter folder.
   - Behavior: `--prompt`, `--agent`, and explicit `agency-swarm/...` model launches skip onboarding.
   - Behavior: auto-project launch requires a detected Agency project.
+  - Behavior: if a detected local project has a ready Python environment but fails during project startup, the TUI opens Build with the startup error prefilled instead of exiting to the shell. After the user fixes the project, choosing Run from `/agents` starts the same local project.
+  - Behavior: from that Build fallback, typing `/` keeps slash commands available by replacing the prefilled repair prompt instead of submitting the startup error text.
+  - Behavior: stale Agency Swarm settings from `OPENCODE_CONFIG_CONTENT` cannot override the freshly prepared local Run server after startup falls back to Build.
+  - Behavior: if the user connects to an external server from that Build fallback, choosing Run uses the connected server instead of replacing it with the pending local project.
   - Behavior: non-Agency explicit models do not trigger fork auto-project setup.
-  - Implementation: `shouldRunNpxOnboarding` and `resolveNpxAutoProject` in `packages/opencode/src/agency-swarm/npx.ts`.
+  - Implementation: `shouldRunNpxOnboarding`, `resolveNpxAutoProject`, `prepareProjectLaunch`, and `prepareLocalProjectRunLaunch` in `packages/opencode/src/agency-swarm/npx.ts`; startup fallback args in `packages/opencode/src/cli/cmd/tui/thread.ts`, `packages/opencode/src/cli/cmd/tui/app.tsx`, `packages/opencode/src/cli/cmd/tui/component/dialog-agent.tsx`, `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`, and `packages/opencode/src/cli/cmd/tui/routes/home.tsx`.
+  - Implementation: stale launch-config routing guards live in `packages/opencode/src/config/config.ts` and `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx`.
   - Added by: `772db106`
 
 - **Unreadable project entry recovery**
@@ -382,7 +393,7 @@ Use this index with `USER_FLOWS.md` when a QA row needs the owning fork implemen
 
 - **README mode overview explains Build, Plan, and Run**
   - Intent: document the fork's mode model clearly at the top level.
-  - Behavior: the README explains `/modes`, Build, Plan, and Run, with Run as the connected Agency Swarm path and Build or Plan as native OpenCode modes under the Agent Swarm umbrella.
+  - Behavior: the README explains `/agents`, Build, Plan, and Run, with Run as the connected Agency Swarm path and Build or Plan as native OpenCode modes under the Agent Swarm umbrella.
   - Implementation: the `Main TUI Flows` section in `README.md`.
   - Added by: `1df2f455`
 

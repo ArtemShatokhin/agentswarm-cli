@@ -639,6 +639,7 @@ export async function startTui(input: {
   agency?: string
   recipientAgent?: string
   configSource?: "env" | "file"
+  configContent?: string
   config?: TuiConfigOverride
 }): Promise<TuiProcess> {
   const root = await mkdtemp(path.join(os.tmpdir(), "agentswarm-tui-e2e-"))
@@ -653,7 +654,8 @@ export async function startTui(input: {
   const screen = new TerminalScreen(cols, rows)
   let raw = ""
   let exitCode: number | undefined
-  const configContent = input.baseURL ? JSON.stringify(buildTuiConfig(input)) : undefined
+  const configContent = input.configContent ?? (input.baseURL ? JSON.stringify(buildTuiConfig(input)) : undefined)
+  const binaryPath = input.binaryPath ?? process.env.AGENTSWARM_TUI_E2E_BINARY_PATH
 
   if (configContent && input.configSource === "file") {
     const globalConfig = path.join(root, "config", "agentswarm")
@@ -681,7 +683,7 @@ export async function startTui(input: {
     ...(configContent && input.configSource !== "file" ? { OPENCODE_CONFIG_CONTENT: configContent } : {}),
     ...(input.env ?? {}),
   })
-  let proc = spawnTuiProcess({ args, binaryPath: input.binaryPath, cwd: input.cwd, env, cols, rows })
+  let proc = spawnTuiProcess({ args, binaryPath, cwd: input.cwd, env, cols, rows })
 
   let dataReceived = false
   let activeProc = proc
@@ -711,7 +713,7 @@ export async function startTui(input: {
       onRetry: async () => {
         await closeProcess(proc)
         await Bun.sleep(initialOutputRetryDelayMs)
-        proc = spawnTuiProcess({ args, binaryPath: input.binaryPath, cwd: input.cwd, env, cols, rows })
+        proc = spawnTuiProcess({ args, binaryPath, cwd: input.cwd, env, cols, rows })
         dataReceived = false
         exitCode = undefined
         attachProcess(proc)

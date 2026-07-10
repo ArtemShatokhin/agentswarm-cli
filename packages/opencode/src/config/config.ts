@@ -301,6 +301,115 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
   plugin_origins?: ConfigPlugin.Origin[]
 }
 
+const AGENCY_SWARM_PROVIDER_ID = "agency-swarm"
+const AGENCY_SWARM_LOCAL_AGENCY_ID = "local-agency"
+const AGENCY_SWARM_RUN_PROJECT_ENV = "AGENTSWARM_RUN_PROJECT"
+const AGENCY_SWARM_PENDING_RUN_PROJECT_ENV = "AGENTSWARM_PENDING_RUN_PROJECT"
+const AGENCY_SWARM_GENERATED_RUN_DISCOVERY_TIMEOUT_MS = 2000
+let agencySwarmRunConfigContent: string | undefined
+let agencySwarmStripConfigContentRouting = false
+
+function hasAgencySwarmRunProjectEnv() {
+  return !!process.env[AGENCY_SWARM_RUN_PROJECT_ENV] || !!process.env[AGENCY_SWARM_PENDING_RUN_PROJECT_ENV]
+}
+
+function isPreparedLocalAgencySwarmRunConfig(config: Info) {
+  const options = config.provider?.[AGENCY_SWARM_PROVIDER_ID]?.options
+  if (!isRecord(options)) return false
+  const agency = options["agency"]
+  const baseURL = options["baseURL"] ?? options["base_url"]
+  return agency === AGENCY_SWARM_LOCAL_AGENCY_ID && typeof baseURL === "string" && isLoopbackBaseURL(baseURL)
+}
+
+function isGeneratedLocalAgencySwarmRunConfig(config: Info) {
+  const options = config.provider?.[AGENCY_SWARM_PROVIDER_ID]?.options
+  if (!isRecord(options)) return false
+  if (!isPreparedLocalAgencySwarmRunConfig(config)) return false
+  const discoveryTimeoutMs = options["discoveryTimeoutMs"] ?? options["discovery_timeout_ms"]
+  const hasRememberedServers = "localServers" in options || "local_servers" in options
+  return (
+    !hasRememberedServers &&
+    options["timeout"] === false &&
+    discoveryTimeoutMs === AGENCY_SWARM_GENERATED_RUN_DISCOVERY_TIMEOUT_MS
+  )
+}
+
+function agencySwarmRunRoutingConfig(config: Info): Info {
+  const provider = config.provider?.[AGENCY_SWARM_PROVIDER_ID]
+  const result: Info = provider
+    ? {
+        provider: {
+          [AGENCY_SWARM_PROVIDER_ID]: provider,
+        },
+      }
+    : {}
+  if (config.model?.startsWith(`${AGENCY_SWARM_PROVIDER_ID}/`)) result.model = config.model
+  return result
+}
+
+function hasAgencySwarmProvider(config: Info) {
+  return !!config.provider?.[AGENCY_SWARM_PROVIDER_ID]
+}
+
+function isLoopbackBaseURL(baseURL: string) {
+  try {
+    const host = new URL(baseURL).hostname
+    return host === "127.0.0.1" || host === "0.0.0.0" || host === "localhost" || host === "::1" || host === "[::1]"
+  } catch {
+    return false
+  }
+}
+
+function stripAgencySwarmRouting(config: Info, options: { stripModel?: boolean } = {}): Info {
+  const result = { ...config }
+  if (result.provider?.[AGENCY_SWARM_PROVIDER_ID]) {
+    const provider = { ...result.provider }
+    delete provider[AGENCY_SWARM_PROVIDER_ID]
+    if (Object.keys(provider).length > 0) {
+      result.provider = provider
+    } else {
+      delete result.provider
+    }
+  }
+  if (result.disabled_providers) {
+    result.disabled_providers = result.disabled_providers.filter((item) => item !== AGENCY_SWARM_PROVIDER_ID)
+  }
+  if (result.enabled_providers && !result.enabled_providers.includes(AGENCY_SWARM_PROVIDER_ID)) {
+    result.enabled_providers = [...result.enabled_providers, AGENCY_SWARM_PROVIDER_ID]
+  }
+  if (options.stripModel) delete result.model
+  return result
+}
+
+function prepareAgencySwarmConfigContentMerge(current: Info, next: Info): { current: Info; next: Info } {
+  if (agencySwarmStripConfigContentRouting) {
+    const staleRouting = hasAgencySwarmProvider(next)
+    return {
+      current,
+      next: stripAgencySwarmRouting(next, {
+        stripModel: staleRouting || next.model?.startsWith(`${AGENCY_SWARM_PROVIDER_ID}/`),
+      }),
+    }
+  }
+  if (!hasAgencySwarmRunProjectEnv()) return { current, next }
+
+  const currentPrepared = isPreparedLocalAgencySwarmRunConfig(current)
+  const nextPrepared = isPreparedLocalAgencySwarmRunConfig(next)
+  if (nextPrepared) {
+    return {
+      current: stripAgencySwarmRouting(current),
+      next,
+    }
+  }
+  if (!currentPrepared) return { current, next }
+  return {
+    current,
+    next: stripAgencySwarmRouting(next, {
+      stripModel: true,
+    }),
+  }
+}
+
 type State = {
   config: Info
   directories: string[]
@@ -659,12 +768,21 @@ export const layer = Layer.effect(
           yield* mergePluginOrigins(dir, list)
         }
 
-        if (process.env.OPENCODE_CONFIG_CONTENT) {
+        const useRunConfigContent = hasAgencySwarmRunProjectEnv()
+        if (!useRunConfigContent) agencySwarmRunConfigContent = undefined
+        for (const configContent of [
+          process.env.OPENCODE_CONFIG_CONTENT,
+          useRunConfigContent ? agencySwarmRunConfigContent : undefined,
+        ]) {
+          if (!configContent) continue
           const source = "OPENCODE_CONFIG_CONTENT"
-          const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
+          const loaded = yield* loadConfig(configContent, {
             dir: ctx.directory,
             source,
           })
+          const prepared = prepareAgencySwarmConfigContentMerge(result, loaded)
+          result = prepared.current
+          const next = prepared.next
           yield* merge(source, next, "local")
           log.debug("loaded custom config from OPENCODE_CONFIG_CONTENT")
         }
@@ -819,6 +937,19 @@ export const layer = Layer.effect(
     })
 
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
+      if (hasAgencySwarmRunProjectEnv() && isGeneratedLocalAgencySwarmRunConfig(config)) {
+        agencySwarmRunConfigContent = JSON.stringify(agencySwarmRunRoutingConfig(config))
+        agencySwarmStripConfigContentRouting = false
+        yield* invalidate()
+        return { info: config, changed: true }
+      }
+      const reroutedConfigContent =
+        !!(agencySwarmRunConfigContent ?? process.env.OPENCODE_CONFIG_CONTENT) && hasAgencySwarmProvider(config)
+      if (reroutedConfigContent) {
+        agencySwarmRunConfigContent = undefined
+        agencySwarmStripConfigContentRouting = true
+      }
+
       const file = globalConfigFile()
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)
@@ -839,8 +970,8 @@ export const layer = Layer.effect(
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
 
-      if (changed) yield* invalidate()
-      return { info: next, changed }
+      if (changed || reroutedConfigContent) yield* invalidate()
+      return { info: next, changed: changed || reroutedConfigContent }
     })
 
     return Service.of({
