@@ -1015,6 +1015,37 @@ planMode.instance(
   { git: true },
 )
 
+planMode.instance(
+  "Build prompt can switch unclear Agency Swarm work to Plan",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Build to plan",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "build a cold email swarm" }],
+      })
+
+      yield* llm.text("planning")
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role).toBe("assistant")
+
+      const [input] = yield* llm.inputs
+      const payload = JSON.stringify(input)
+      expect(payload).toContain("Agent Swarm Build Instructions")
+      expect(payload).toContain("plan_enter")
+    }),
+  { git: true },
+)
+
 it.instance(
   "legacy Plan prompt skips Agent Swarm planner instructions without native plan mode",
   () =>
