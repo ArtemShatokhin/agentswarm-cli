@@ -1,0 +1,22 @@
+kortix_version: 2
+project:
+  name: webhook-bug-lab-2
+  description: ""
+env:
+  required: []
+  optional: []
+default_agent: kortix
+agents:
+  kortix:
+    connectors: all
+    secrets: all
+    kortix_cli: all
+    skills: all
+triggers:
+  - slug: lab-webhook-v2
+    name: Lab Webhook v2
+    type: webhook
+    agent: default
+    enabled: true
+    secret_env: WEBHOOK_LAB_SECRET_V2
+    prompt: Fixed-flow test event.
