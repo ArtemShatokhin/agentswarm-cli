@@ -20,3 +20,10 @@ triggers:
     enabled: true
     secret_env: WEBHOOK_LAB_SECRET_V2
     prompt: Fixed-flow test event.
+  - slug: test
+    name: test
+    type: webhook
+    agent: default
+    enabled: true
+    secret_env: WEBHOOK_TEST_SECRET
+    prompt: hi
